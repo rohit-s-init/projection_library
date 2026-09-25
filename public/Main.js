@@ -1,7 +1,5 @@
-import Path from "./Shapes/Path.js";
 import Point from "./Point.js";
 import Space from "./Space.js";
-import Face from "./Shapes/face.js";
 import Structure from "./Shapes/Structure.js";
 
 console.log("Hello World");
@@ -1673,7 +1671,7 @@ document.addEventListener("keypress", (event) => {
     if (event.code == "KeyT") {
         // space.incZ0();
         for (let k = 12; k < 24; k++) {
-            posArr[2 + 4 * k] += 0.1
+            space.posArr[2 + 4 * k] += 0.1
         }
 
         myRegularRect();
@@ -1681,7 +1679,7 @@ document.addEventListener("keypress", (event) => {
     if (event.code == "KeyG") {
         // space.decZ0();
         for (let k = 12; k < 24; k++) {
-            posArr[2 + 4 * k] -= 0.1
+            space.posArr[2 + 4 * k] -= 0.1
         }
 
         myRegularRect();
@@ -1689,7 +1687,7 @@ document.addEventListener("keypress", (event) => {
     if (event.code == "KeyH") {
         // space.incX0();
         for (let k = 12; k < 24; k++) {
-            posArr[0 + 4 * k] += 0.1
+            space.posArr[0 + 4 * k] += 0.1
         }
 
         myRegularRect();
@@ -1697,7 +1695,7 @@ document.addEventListener("keypress", (event) => {
     if (event.code == "KeyF") {
         // space.decX0();
         for (let k = 12; k < 24; k++) {
-            posArr[0 + 4 * k] -= 0.1
+            space.posArr[0 + 4 * k] -= 0.1
         }
 
         myRegularRect();
@@ -1705,7 +1703,7 @@ document.addEventListener("keypress", (event) => {
     if (event.code == "KeyB") {
         // space.decX0();
         for (let k = 12; k < 24; k++) {
-            posArr[1 + 4 * k] += 0.1
+            space.posArr[1 + 4 * k] += 0.1
         }
 
         myRegularRect();
@@ -1713,7 +1711,7 @@ document.addEventListener("keypress", (event) => {
     if (event.code == "KeyN") {
         // space.decX0();
         for (let k = 12; k < 24; k++) {
-            posArr[1 + 4 * k] -= 0.1
+            space.posArr[1 + 4 * k] -= 0.1
         }
 
         myRegularRect();

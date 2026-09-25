@@ -110,6 +110,11 @@
         sizeCanvas();
         /** @type {WebGLRenderingContext} */
         const gl = canvas.getContext("webgl", { alpha: false, antialias: true });
+        if (!gl) {
+            document.body.insertAdjacentHTML("beforeend",
+                '<p style="position:fixed;inset:0;display:grid;place-items:center;margin:0;font-size:16px">WebGL is not available in this browser or device.</p>');
+            throw new Error("WebGL not available");
+        }
         const space = new Space(gl);
         gl.clearColor(BG[0], BG[1], BG[2], 1);
         gl.viewport(0, 0, canvas.width, canvas.height);

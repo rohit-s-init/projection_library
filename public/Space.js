@@ -1,7 +1,3 @@
-import Point from "./Point.js";
-import Path from "./Shapes/Path.js";
-import Face from "./Shapes/face.js";
-
 export default class Space {
 
 
@@ -201,7 +197,6 @@ export default class Space {
 
 
 
-        this.face = new Face();
 
         // this.drawPath(this.face.path);
 
