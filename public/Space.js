@@ -309,7 +309,7 @@ export default class Space {
         this.colArr = this.colArr.concat(structure.colArr);
         structure.startVertId += this.totalVert;
         structure.endVertId += this.totalVert;
-        this.totalVert += (3 * structure.vertArrays.length) / 4;
+        this.totalVert += (1 * structure.vertArrays.length) / 4;
     }
 
     moveStructure(structure, dx, dy, dz) {
