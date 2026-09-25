@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Animation Demo</title>
+    <style>
+        :root {
+            --bg: #0b0d12;
+            --panel: rgba(20, 23, 31, 0.92);
+            --border: #2a2f3b;
+            --text: #d8dce6;
+            --muted: #8a91a3;
+        }
+
+        * { box-sizing: border-box; }
+
+        html, body {
+            margin: 0;
+            height: 100%;
+            background: var(--bg);
+            color: var(--text);
+            font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+            overflow: hidden;
+        }
+
+        #stage {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Space's shader scales x by 1/16 and y by 1/8, so the canvas must be 2:1 */
+        #view { display: block; touch-action: none; cursor: grab; }
+        #view.dragging { cursor: grabbing; }
+
+        #panel {
+            position: fixed;
+            top: 12px;
+            left: 12px;
+            width: 250px;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px;
+        }
+
+        h1 { font-size: 15px; margin: 0 0 10px; font-weight: 600; }
+
+        .row { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+        .row label:first-child { width: 48px; color: var(--muted); }
+
+        select, button {
+            background: #10131a;
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            padding: 5px 8px;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        input[type=range] { flex: 1; }
+        .hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+        #info { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; margin-top: 8px; }
+    </style>
+</head>
+
+<body>
+    <div id="stage"><canvas id="view"></canvas></div>
+
+    <div id="panel">
+        <h1>Animation Demo</h1>
+        <div class="row">
+            <label for="demo">Model</label>
+            <select id="demo">
+                <option value="jellyfish">Jellyfish</option>
+                <option value="blob">Morphing blob</option>
+                <option value="flag">Waving flag</option>
+            </select>
+        </div>
+        <div class="row">
+            <label for="speed">Speed</label>
+            <input id="speed" type="range" min="0" max="3" step="0.05" value="1">
+        </div>
+        <div class="row">
+            <button id="pause">Pause</button>
+            <label><input id="lighting" type="checkbox" checked> Shading</label>
+        </div>
+        <p class="hint">Drag to rotate · Shift/right-drag to pan · Wheel to zoom</p>
+        <div id="info"></div>
+    </div>
+
+    <script type="module">
+        import Space from "./Space.js";
+
+        const BG = [0.043, 0.051, 0.071];
+        const TAU = Math.PI * 2;
+
+        const canvas = document.getElementById("view");
+        const infoEl = document.getElementById("info");
+        const demoEl = document.getElementById("demo");
+        const speedEl = document.getElementById("speed");
+        const pauseEl = document.getElementById("pause");
+        const lightingEl = document.getElementById("lighting");
+
+        sizeCanvas();
+        /** @type {WebGLRenderingContext} */
+        const gl = canvas.getContext("webgl", { alpha: false, antialias: true });
+        const space = new Space(gl);
+        gl.clearColor(BG[0], BG[1], BG[2], 1);
+        gl.viewport(0, 0, canvas.width, canvas.height);
+
+        function sizeCanvas() {
+            const w = window.innerWidth, h = window.innerHeight;
+            let cw = w, ch = w / 2;
+            if (ch > h) { ch = h; cw = h * 2; }
+            const dpr = window.devicePixelRatio || 1;
+            canvas.style.width = cw + "px";
+            canvas.style.height = ch + "px";
+            canvas.width = Math.round(cw * dpr);
+            canvas.height = Math.round(ch * dpr);
+        }
+        window.addEventListener("resize", () => {
+            sizeCanvas();
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        });
+
+        // ------------------------------------------------------------------ camera (same conventions as Space.js)
+
+        function syncCamera() {
+            space.beta = Math.max(-1.55, Math.min(1.55, space.beta));
+            space.Rc = Math.max(2, Math.min(700, space.Rc));
+            const a = space.alpha, b = space.beta, r = space.Rc;
+            space.Xc = space.X0 + Math.cos(b) * Math.cos(a) * r;
+            space.Yc = space.Y0 + Math.cos(b) * Math.sin(a) * r;
+            space.Zc = space.Z0 + Math.sin(b) * r;
+        }
+
+        function resetView() {
+            space.X0 = space.Y0 = space.Z0 = 0;
+            space.alpha = Math.PI - 0.5;
+            space.beta = 0.22;
+            space.Rc = 70;
+            syncCamera();
+        }
+
+        let drag = null;
+        canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+        canvas.addEventListener("pointerdown", (e) => {
+            canvas.setPointerCapture(e.pointerId);
+            canvas.classList.add("dragging");
+            space.updateMyVectors();
+            drag = {
+                x: e.clientX, y: e.clientY,
+                pan: e.button === 2 || e.shiftKey,
+                alpha: space.alpha, beta: space.beta,
+                target: [space.X0, space.Y0, space.Z0],
+            };
+        });
+        canvas.addEventListener("pointermove", (e) => {
+            if (!drag) return;
+            const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+            if (drag.pan) {
+                const k = (1.6 * space.Rc / space.magnifier) / (canvas.clientWidth / 2);
+                const xa = space.xUnitVec, ya = space.yUnitVec;
+                space.X0 = drag.target[0] - (dx * xa[0] - dy * ya[0]) * k;
+                space.Y0 = drag.target[1] - (dx * xa[1] - dy * ya[1]) * k;
+                space.Z0 = drag.target[2] - (dx * xa[2] - dy * ya[2]) * k;
+            } else {
+                space.alpha = drag.alpha + dx / 250;
+                space.beta = drag.beta + dy / 250;
+            }
+            syncCamera();
+        });
+        const endDrag = () => { drag = null; canvas.classList.remove("dragging"); };
+        canvas.addEventListener("pointerup", endDrag);
+        canvas.addEventListener("pointercancel", endDrag);
+        canvas.addEventListener("wheel", (e) => {
+            e.preventDefault();
+            space.Rc *= Math.exp(e.deltaY * 0.0012);
+            syncCamera();
+        }, { passive: false });
+
+        // ------------------------------------------------------------------ deformable surfaces
+        //
+        // A model is a list of parametric surfaces. Each surface is a (nu+1)×(nv+1) grid of vertices whose
+        // position and color are functions of (u, v, t). Every frame the grid is re-evaluated at the new time,
+        // normals are recomputed from the deformed shape, and the triangles are written into Space's
+        // posArr / colArr — so the mesh itself changes shape, it is not just moved.
+
+        class Surface {
+            constructor(nu, nv, pos, col) {
+                this.nu = nu; this.nv = nv;
+                this.pos = pos;   // (u, v, t) => [x, y, z]   (Space world coords, Z up)
+                this.col = col;   // (u, v, t) => [r, g, b]
+                const n = (nu + 1) * (nv + 1);
+                this.P = new Float32Array(n * 3);
+                this.C = new Float32Array(n * 3);
+                this.N = new Float32Array(n * 3);
+                const idx = [];
+                for (let i = 0; i < nu; i++) {
+                    for (let j = 0; j < nv; j++) {
+                        const a = i * (nv + 1) + j, b = a + nv + 1;
+                        idx.push(a, b, a + 1, a + 1, b, b + 1);
+                    }
+                }
+                this.idx = Uint32Array.from(idx);
+            }
+
+            evaluate(t) {
+                const { nu, nv, P, C, N, idx } = this;
+                let k = 0;
+                for (let i = 0; i <= nu; i++) {
+                    for (let j = 0; j <= nv; j++, k += 3) {
+                        const u = i / nu, v = j / nv;
+                        const p = this.pos(u, v, t), c = this.col(u, v, t);
+                        P[k] = p[0]; P[k + 1] = p[1]; P[k + 2] = p[2];
+                        C[k] = c[0]; C[k + 1] = c[1]; C[k + 2] = c[2];
+                    }
+                }
+                // smooth vertex normals from the deformed triangles
+                N.fill(0);
+                for (let f = 0; f < idx.length; f += 3) {
+                    const a = 3 * idx[f], b = 3 * idx[f + 1], c = 3 * idx[f + 2];
+                    const e1x = P[b] - P[a], e1y = P[b + 1] - P[a + 1], e1z = P[b + 2] - P[a + 2];
+                    const e2x = P[c] - P[a], e2y = P[c + 1] - P[a + 1], e2z = P[c + 2] - P[a + 2];
+                    const nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+                    for (const q of [a, b, c]) { N[q] += nx; N[q + 1] += ny; N[q + 2] += nz; }
+                }
+                for (let q = 0; q < N.length; q += 3) {
+                    const m = Math.hypot(N[q], N[q + 1], N[q + 2]) || 1;
+                    N[q] /= m; N[q + 1] /= m; N[q + 2] /= m;
+                }
+            }
+        }
+
+        const LIGHTS = [
+            { dir: normalize([-0.45, 0.35, 0.82]), k: 0.6 },
+            { dir: normalize([0.6, -0.5, -0.25]), k: 0.22 },
+        ];
+        const AMBIENT = 0.32;
+
+        function normalize(v) {
+            const m = Math.hypot(v[0], v[1], v[2]) || 1;
+            return [v[0] / m, v[1] / m, v[2] / m];
+        }
+
+        let surfaces = [];
+        let pos = new Float32Array(0), col = new Float32Array(0);
+
+        function setModel(list) {
+            surfaces = list;
+            const corners = list.reduce((s, m) => s + m.idx.length, 0);
+            pos = new Float32Array(corners * 4);
+            col = new Float32Array(corners * 4);
+            space.posArr = pos;
+            space.colArr = col;
+            space.totalVert = corners;
+            infoEl.textContent = (corners / 3).toLocaleString() + " triangles";
+        }
+
+        function writeFrame(t) {
+            const shaded = lightingEl.checked;
+            let o = 0;
+            for (const s of surfaces) {
+                s.evaluate(t);
+                const { P, C, N, idx } = s;
+                for (let f = 0; f < idx.length; f++, o += 4) {
+                    const q = 3 * idx[f];
+                    pos[o] = P[q]; pos[o + 1] = P[q + 1]; pos[o + 2] = P[q + 2]; pos[o + 3] = 1;
+                    let l = 1;
+                    if (shaded) {
+                        l = AMBIENT;
+                        for (const L of LIGHTS) l += L.k * Math.abs(N[q] * L.dir[0] + N[q + 1] * L.dir[1] + N[q + 2] * L.dir[2]);
+                    }
+                    col[o] = Math.min(1, C[q] * l);
+                    col[o + 1] = Math.min(1, C[q + 1] * l);
+                    col[o + 2] = Math.min(1, C[q + 2] * l);
+                    col[o + 3] = 1;
+                }
+            }
+        }
+
+        const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+        const clamp01 = (x) => Math.max(0, Math.min(1, x));
+
+        // ------------------------------------------------------------------ demo models
+
+        function jellyfish() {
+            const R = 12, LIFT = 6;
+            const pulse = (t) => Math.sin(2 * t);                // contraction cycle
+            const bob = (t) => 1.2 * Math.sin(2 * t - 1.2);      // lags the pulse like a real swim stroke
+
+            // bell: v runs from the apex (0) to the rim (1); the rim squeezes in on each pulse and ripples
+            function bellPoint(u, v, t) {
+                const a = TAU * u, phi = v * Math.PI * 0.52, p = pulse(t);
+                let r = R * Math.sin(phi) * (1 - 0.2 * p * v * v);
+                r *= 1 + 0.035 * Math.sin(8 * a + 3 * t) * v;
+                const z = R * 0.8 * Math.cos(phi) * (1 + 0.1 * p) + LIFT + bob(t) - 1.5 * p * v * v;
+                return [r * Math.cos(a), r * Math.sin(a), z];
+            }
+            const bell = new Surface(72, 22, bellPoint, (u, v, t) => {
+                const glow = 0.12 * Math.max(0, Math.sin(12 * TAU * u)) * v;
+                const c = mix([1.0, 0.62, 0.86], [0.58, 0.38, 1.0], v);
+                return [clamp01(c[0] + glow), clamp01(c[1] + glow), clamp01(c[2] + glow)];
+            });
+
+            // tentacles hang from the rim, sway with a travelling wave and trail the bell's motion
+            const tentacles = [];
+            const COUNT = 10, LEN = 26;
+            for (let k = 0; k < COUNT; k++) {
+                const a0 = (k + 0.5) / COUNT;
+                tentacles.push(new Surface(60, 8, (u, v, t) => {
+                    const lag = t - u * 0.6;
+                    const base = bellPoint(a0, 0.97, lag);
+                    const sway = u * u * 4;
+                    const cx = base[0] * (1 - 0.35 * u) + sway * Math.sin(5 * u - 2.4 * t + k);
+                    const cy = base[1] * (1 - 0.35 * u) + sway * Math.cos(4 * u - 2.0 * t + 1.7 * k);
+                    const cz = base[2] - u * LEN;
+                    const thick = 0.7 * (1 - u) + 0.12;
+                    const w = TAU * v;
+                    return [cx + thick * Math.cos(w), cy + thick * Math.sin(w), cz];
+                }, (u) => mix([0.98, 0.78, 1.0], [0.55, 0.9, 1.0], u)));
+            }
+            return [bell, ...tentacles];
+        }
+
+        function blob() {
+            const R = 13;
+            const disp = (th, ph, t) =>
+                0.16 * Math.sin(3 * th + 2 * t) * Math.sin(4 * ph + 1.3 * t) +
+                0.07 * Math.sin(6 * th - 2.1 * t + 2 * ph);
+            const palette = (d) => {
+                const x = clamp01((d + 0.23) / 0.46);
+                return x < 0.5 ? mix([0.18, 0.2, 0.75], [0.85, 0.3, 0.6], x * 2) : mix([0.85, 0.3, 0.6], [1.0, 0.82, 0.25], x * 2 - 1);
+            };
+            return [new Surface(96, 64, (u, v, t) => {
+                const ph = TAU * u, th = Math.PI * v;
+                const r = R * (1 + disp(th, ph, t));
+                return [r * Math.sin(th) * Math.cos(ph), r * Math.sin(th) * Math.sin(ph), r * Math.cos(th)];
+            }, (u, v, t) => palette(disp(Math.PI * v, TAU * u, t)))];
+        }
+
+        function flag() {
+            const W = 34, H = 20, POLE = -W / 2 - 0.6;
+            const cloth = new Surface(80, 50, (u, v, t) => {
+                // wave amplitude grows away from the pole; a second ripple travels diagonally
+                const x = u * (2.2 * Math.sin(7 * u - 3.2 * t) + 0.8 * Math.sin(13 * u + 5 * v - 4.5 * t));
+                const y = POLE + 0.6 + u * W * (1 - 0.04 * Math.sin(3.2 * t));
+                const z = (v - 0.5) * H + 4 - u * u * 1.5;
+                return [x, y, z];
+            }, (u, v) => {
+                const dy = (u - 0.5) * W, dz = (v - 0.5) * H;
+                if (dy * dy + dz * dz < 16) return [1.0, 0.8, 0.25];
+                if (v > 2 / 3) return [0.12, 0.62, 0.66];
+                if (v > 1 / 3) return [0.95, 0.92, 0.85];
+                return [0.93, 0.42, 0.36];
+            });
+            const pole = new Surface(16, 1, (u, v) => {
+                const w = TAU * u;
+                return [0.6 * Math.cos(w), POLE + 0.6 * Math.sin(w), -22 + v * (H + 17)];
+            }, () => [0.7, 0.7, 0.72]);
+            return [cloth, pole];
+        }
+
+        const DEMOS = { jellyfish, blob, flag };
+
+        // ------------------------------------------------------------------ loop
+
+        let t = 0, last = performance.now(), paused = false;
+        let frames = 0, fpsTime = last, fps = 0;
+        const baseInfo = () => infoEl.textContent.split(" · ")[0];
+
+        function frame(now) {
+            const dt = Math.min(0.1, (now - last) / 1000);
+            last = now;
+            if (!paused) t += dt * +speedEl.value;
+
+            writeFrame(t);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            space.reDraw();
+
+            frames++;
+            if (now - fpsTime > 500) {
+                fps = Math.round((frames * 1000) / (now - fpsTime));
+                frames = 0; fpsTime = now;
+                infoEl.textContent = baseInfo() + " · " + fps + " fps";
+            }
+            requestAnimationFrame(frame);
+        }
+
+        demoEl.addEventListener("change", () => { setModel(DEMOS[demoEl.value]()); resetView(); });
+        pauseEl.addEventListener("click", () => {
+            paused = !paused;
+            pauseEl.textContent = paused ? "Play" : "Pause";
+        });
+
+        setModel(jellyfish());
+        resetView();
+        requestAnimationFrame(frame);
+    </script>
+</body>
+
+</html>

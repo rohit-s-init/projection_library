@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grass in the Wind</title>
+    <style>
+        :root {
+            --sky: #9ec7ea;
+            --panel: rgba(20, 23, 31, 0.88);
+            --border: #2a2f3b;
+            --text: #d8dce6;
+            --muted: #8a91a3;
+        }
+
+        * { box-sizing: border-box; }
+
+        html, body {
+            margin: 0;
+            height: 100%;
+            background: var(--sky);
+            color: var(--text);
+            font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+            overflow: hidden;
+        }
+
+        #stage {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Space's shader scales x by 1/16 and y by 1/8, so the canvas must be 2:1 */
+        #view { display: block; touch-action: none; cursor: grab; }
+        #view.dragging { cursor: grabbing; }
+
+        #panel {
+            position: fixed;
+            top: 12px;
+            left: 12px;
+            width: 260px;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px;
+        }
+
+        h1 { font-size: 15px; margin: 0 0 10px; font-weight: 600; }
+
+        .row { display: flex; align-items: center; gap: 8px; margin: 9px 0; }
+        .row > label:first-child { width: 72px; color: var(--muted); flex: none; }
+        input[type=range] { flex: 1; min-width: 0; }
+
+        select, button {
+            background: #10131a;
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            padding: 5px 8px;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        .hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+        #info { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; margin-top: 6px; }
+    </style>
+</head>
+
+<body>
+    <div id="stage"><canvas id="view"></canvas></div>
+
+    <div id="panel">
+        <h1>Grass in the Wind</h1>
+        <div class="row">
+            <label for="strength">Wind</label>
+            <input id="strength" type="range" min="0" max="1.6" step="0.01" value="0.8">
+        </div>
+        <div class="row">
+            <label for="direction">Direction</label>
+            <input id="direction" type="range" min="0" max="360" step="1" value="20">
+        </div>
+        <div class="row">
+            <label for="gust">Gust speed</label>
+            <input id="gust" type="range" min="0.2" max="3" step="0.05" value="1">
+        </div>
+        <div class="row">
+            <label for="count">Blades</label>
+            <select id="count">
+                <option value="6000">6,000</option>
+                <option value="12000">12,000</option>
+                <option value="20000" selected>20,000</option>
+                <option value="35000">35,000</option>
+            </select>
+            <button id="pause">Pause</button>
+        </div>
+        <div class="row">
+            <label style="width:auto;color:inherit"><input id="follow" type="checkbox" checked> Camera follows bunny</label>
+        </div>
+        <div class="row">
+            <label style="width:auto;color:inherit"><input id="customShader" type="checkbox" checked> Custom shader (fog + cloud shadows)</label>
+        </div>
+        <p class="hint"><b>W A S D</b> / arrows to walk · <b>Space</b> to jump<br>Drag to rotate · Wheel to zoom · Shift/right-drag to pan (when not following)</p>
+        <div id="info"></div>
+    </div>
+
+    <script type="module">
+        import Space from "./Space.js";
+
+        const SKY = [0.62, 0.78, 0.92];
+        const FIELD = 35;          // grass covers [-FIELD, FIELD] in x and y
+        const GROUND = 36;         // terrain extends a little past the grass
+        const GROUND_RES = 72;
+        const SEGMENTS = 3;        // each blade is 3 bendable segments + a tip
+        const BLADE_CORNERS = 15;  // 5 triangles per blade
+        const FLOWER_CORNERS = 12; // 4 triangles: two crossed diamonds
+        const FLOWER_RATE = 0.015;
+
+        const canvas = document.getElementById("view");
+        const infoEl = document.getElementById("info");
+        const strengthEl = document.getElementById("strength");
+        const directionEl = document.getElementById("direction");
+        const gustEl = document.getElementById("gust");
+        const countEl = document.getElementById("count");
+        const pauseEl = document.getElementById("pause");
+        const followEl = document.getElementById("follow");
+        const customShaderEl = document.getElementById("customShader");
+
+        sizeCanvas();
+        /** @type {WebGLRenderingContext} */
+        const gl = canvas.getContext("webgl", { alpha: false, antialias: true });
+        const space = new Space(gl);
+        gl.clearColor(SKY[0], SKY[1], SKY[2], 1);
+        gl.viewport(0, 0, canvas.width, canvas.height);
+
+        function sizeCanvas() {
+            const w = window.innerWidth, h = window.innerHeight;
+            let cw = w, ch = w / 2;
+            if (ch > h) { ch = h; cw = h * 2; }
+            const dpr = window.devicePixelRatio || 1;
+            canvas.style.width = cw + "px";
+            canvas.style.height = ch + "px";
+            canvas.width = Math.round(cw * dpr);
+            canvas.height = Math.round(ch * dpr);
+        }
+        window.addEventListener("resize", () => {
+            sizeCanvas();
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        });
+
+        // ------------------------------------------------------------------ camera (same conventions as Space.js)
+
+        function syncCamera() {
+            space.beta = Math.max(0.03, Math.min(1.5, space.beta));
+            space.Rc = Math.max(6, Math.min(300, space.Rc));
+            const a = space.alpha, b = space.beta, r = space.Rc;
+            space.Xc = space.X0 + Math.cos(b) * Math.cos(a) * r;
+            space.Yc = space.Y0 + Math.cos(b) * Math.sin(a) * r;
+            space.Zc = space.Z0 + Math.sin(b) * r;
+        }
+
+        space.X0 = 0; space.Y0 = 0; space.Z0 = 0;
+        space.alpha = Math.PI - 0.45;
+        space.beta = 0.32;
+        space.Rc = 26;
+        syncCamera();
+
+        let drag = null;
+        canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+        canvas.addEventListener("pointerdown", (e) => {
+            canvas.setPointerCapture(e.pointerId);
+            canvas.classList.add("dragging");
+            space.updateMyVectors();
+            drag = {
+                x: e.clientX, y: e.clientY,
+                pan: (e.button === 2 || e.shiftKey) && !followEl.checked,
+                alpha: space.alpha, beta: space.beta,
+                target: [space.X0, space.Y0, space.Z0],
+            };
+        });
+        canvas.addEventListener("pointermove", (e) => {
+            if (!drag) return;
+            const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+            if (drag.pan) {
+                const k = (1.6 * space.Rc / space.magnifier) / (canvas.clientWidth / 2);
+                const xa = space.xUnitVec, ya = space.yUnitVec;
+                space.X0 = drag.target[0] - (dx * xa[0] - dy * ya[0]) * k;
+                space.Y0 = drag.target[1] - (dx * xa[1] - dy * ya[1]) * k;
+                space.Z0 = drag.target[2] - (dx * xa[2] - dy * ya[2]) * k;
+            } else {
+                space.alpha = drag.alpha + dx / 250;
+                space.beta = drag.beta + dy / 250;
+            }
+            syncCamera();
+        });
+        const endDrag = () => { drag = null; canvas.classList.remove("dragging"); };
+        canvas.addEventListener("pointerup", endDrag);
+        canvas.addEventListener("pointercancel", endDrag);
+        canvas.addEventListener("wheel", (e) => {
+            e.preventDefault();
+            space.Rc *= Math.exp(e.deltaY * 0.0012);
+            syncCamera();
+        }, { passive: false });
+
+        // ------------------------------------------------------------------ helpers
+
+        function mulberry32(seed) {
+            return () => {
+                seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+                let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+                t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+                return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+            };
+        }
+
+        // rolling hills, Z is up in Space
+        function height(x, y) {
+            return 2.6 * Math.sin(x * 0.075 + 0.4) * Math.cos(y * 0.065 - 0.3)
+                + 1.1 * Math.sin(x * 0.16 + y * 0.12)
+                + 0.5 * Math.cos(x * 0.31 - y * 0.27);
+        }
+
+        // lushness varies in patches: taller, greener grass in some areas
+        function lush(x, y) {
+            return 0.5 + 0.5 * Math.sin(x * 0.11 + 1.3) * Math.sin(y * 0.09 - 0.7);
+        }
+
+        const LIGHT = normalize([-0.4, 0.3, 0.87]);
+        function normalize(v) {
+            const m = Math.hypot(v[0], v[1], v[2]) || 1;
+            return [v[0] / m, v[1] / m, v[2] / m];
+        }
+
+        // ------------------------------------------------------------------ scene data
+
+        let pos, col;               // Space's posArr / colArr
+        let groundCorners = 0;
+        let blades = null, flowers = null;
+        let tipX, tipY, tipZ;       // per-blade tip position, reused by flowers
+
+        function buildScene(count) {
+            const rand = mulberry32(1337);
+
+            // blades: static per-blade properties in flat typed arrays
+            blades = {
+                n: count,
+                x: new Float32Array(count), y: new Float32Array(count), z: new Float32Array(count),
+                fx: new Float32Array(count), fy: new Float32Array(count),     // facing (horizontal)
+                len: new Float32Array(count), wid: new Float32Array(count),
+                lean: new Float32Array(count), stiff: new Float32Array(count), phase: new Float32Array(count),
+                r: new Float32Array(count), g: new Float32Array(count), b: new Float32Array(count),
+            };
+            for (let i = 0; i < count; i++) {
+                const x = (rand() * 2 - 1) * FIELD, y = (rand() * 2 - 1) * FIELD;
+                const l = lush(x, y);
+                const yaw = rand() * Math.PI * 2;
+                blades.x[i] = x; blades.y[i] = y; blades.z[i] = height(x, y) - 0.05;
+                blades.fx[i] = Math.cos(yaw); blades.fy[i] = Math.sin(yaw);
+                blades.len[i] = (1.3 + rand() * 1.4) * (0.7 + 0.6 * l);
+                blades.wid[i] = 0.16 + rand() * 0.14;
+                blades.lean[i] = 0.1 + rand() * 0.35;
+                blades.stiff[i] = 0.75 + rand() * 0.5;
+                blades.phase[i] = rand() * Math.PI * 2;
+                // greens with some dry, yellowish blades mixed in
+                const dry = rand() < 0.12 ? 0.5 + rand() * 0.5 : rand() * 0.25;
+                const shade = 0.85 + rand() * 0.3;
+                blades.r[i] = (0.2 + 0.45 * dry) * shade;
+                blades.g[i] = (0.5 + 0.12 * l + 0.05 * dry) * shade;
+                blades.b[i] = (0.1 + 0.05 * l) * shade;
+            }
+            tipX = new Float32Array(count); tipY = new Float32Array(count); tipZ = new Float32Array(count);
+
+            const FLOWER_COLORS = [[1, 1, 0.95], [1, 0.86, 0.2], [0.72, 0.5, 1], [1, 0.55, 0.75]];
+            flowers = [];
+            for (let i = 0; i < count; i++) {
+                if (rand() < FLOWER_RATE) {
+                    blades.len[i] *= 1.25;
+                    flowers.push({ blade: i, color: FLOWER_COLORS[(rand() * FLOWER_COLORS.length) | 0], size: 0.2 + rand() * 0.12 });
+                }
+            }
+
+            groundCorners = GROUND_RES * GROUND_RES * 6;
+            const total = groundCorners + count * BLADE_CORNERS + flowers.length * FLOWER_CORNERS + CHAR_CORNERS;
+            pos = new Float32Array(total * 4);
+            col = new Float32Array(total * 4);
+            writeGround();
+
+            space.posArr = pos;
+            space.colArr = col;
+            space.totalVert = total;
+            infoEl.dataset.tris = (total / 3).toLocaleString();
+        }
+
+        // terrain never moves, so it is written once at the start of the arrays
+        function writeGround() {
+            const step = (2 * GROUND) / GROUND_RES;
+            let o = 0;
+            const put = (x, y) => {
+                const z = height(x, y);
+                const e = 0.05;
+                const n = normalize([height(x - e, y) - height(x + e, y), height(x, y - e) - height(x, y + e), 2 * e]);
+                const l = lush(x, y);
+                const light = 0.45 + 0.6 * Math.max(0, n[0] * LIGHT[0] + n[1] * LIGHT[1] + n[2] * LIGHT[2]);
+                pos[o] = x; pos[o + 1] = y; pos[o + 2] = z; pos[o + 3] = 1;
+                col[o] = (0.2 + 0.08 * (1 - l)) * light;
+                col[o + 1] = (0.33 + 0.1 * l) * light;
+                col[o + 2] = 0.1 * light;
+                col[o + 3] = 1;
+                o += 4;
+            };
+            for (let i = 0; i < GROUND_RES; i++) {
+                for (let j = 0; j < GROUND_RES; j++) {
+                    const x0 = -GROUND + i * step, y0 = -GROUND + j * step, x1 = x0 + step, y1 = y0 + step;
+                    put(x0, y0); put(x1, y0); put(x1, y1);
+                    put(x0, y0); put(x1, y1); put(x0, y1);
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------ wind + per-frame blade update
+
+        // Gusts are bands of stronger wind that travel downwind across the field. Two wave trains at different
+        // scales and speeds, with the fast one wobbling sideways, so the gust fronts look irregular.
+        function gustAt(s, q, t) {
+            const g1 = 0.5 + 0.5 * Math.sin(s * 0.13 - t * 2.3 + 1.6 * Math.sin(q * 0.06 + t * 0.25));
+            const g2 = 0.5 + 0.5 * Math.sin(s * 0.04 - t * 0.9 + 0.8 * Math.sin(q * 0.03));
+            return 0.55 * g1 * g1 + 0.45 * g2;
+        }
+
+        function writeBlades(t) {
+            const strength = +strengthEl.value;
+            const ang = (+directionEl.value * Math.PI) / 180;
+            const dx = Math.cos(ang), dy = Math.sin(ang);
+            const B = blades;
+            let o = groundCorners * 4;
+
+            // reusable per-blade scratch: centre line points and half-widths
+            const px = [0, 0, 0, 0], py = [0, 0, 0, 0], pz = [0, 0, 0, 0];
+            const halfW = [0.5, 0.36, 0.2];
+
+            // the bunny pushes grass aside around its feet (less when it is in the air)
+            const cx = C.x, cy = C.y;
+            const push = PUSH_STRENGTH * Math.max(0, 1 - (C.z + C.hop) / 1.2);
+
+            for (let i = 0; i < B.n; i++) {
+                const x = B.x[i], y = B.y[i];
+                const s = x * dx + y * dy;          // distance along the wind
+                const q = -x * dy + y * dx;         // distance across the wind
+                const g = gustAt(s, q, t);
+
+                // how far this blade bends right now: steady push + gust + a fast flutter
+                const flutter = 0.07 * Math.sin(t * 7.5 + B.phase[i]) * (0.3 + g);
+                const windBend = (strength * (0.12 + 0.88 * g) + flutter * strength) / B.stiff[i];
+
+                // bend is a horizontal vector: wind direction plus a radial shove away from the bunny
+                let bx = dx * windBend, by = dy * windBend;
+                const ex = x - cx, ey = y - cy, d2 = ex * ex + ey * ey;
+                if (push > 0 && d2 < PUSH_RADIUS * PUSH_RADIUS) {
+                    const d = Math.sqrt(d2) + 1e-4;
+                    const p = push * (1 - d / PUSH_RADIUS);
+                    bx += (ex / d) * p; by += (ey / d) * p;
+                }
+                const bend = Math.hypot(bx, by);
+                const ux = bend > 1e-6 ? bx / bend : dx, uy = bend > 1e-6 ? by / bend : dy;
+
+                // walk up the blade; each segment tilts a bit further downwind (keeps the blade's length)
+                const segLen = B.len[i] / SEGMENTS;
+                const fx = B.fx[i], fy = B.fy[i], lean = B.lean[i];
+                px[0] = x; py[0] = y; pz[0] = B.z[i];
+                for (let k = 1; k <= SEGMENTS; k++) {
+                    const h = k / SEGMENTS;
+                    const a = Math.min(1.45, bend * 1.25 * Math.pow(h, 1.4));
+                    const sa = Math.sin(a), ca = Math.cos(a);
+                    const l = lean * h;
+                    px[k] = px[k - 1] + segLen * (sa * ux + l * fx * ca);
+                    py[k] = py[k - 1] + segLen * (sa * uy + l * fy * ca);
+                    pz[k] = pz[k - 1] + segLen * ca;
+                }
+                tipX[i] = px[SEGMENTS]; tipY[i] = py[SEGMENTS]; tipZ[i] = pz[SEGMENTS];
+
+                // blade width runs across its facing direction
+                const wx = -fy * B.wid[i], wy = fx * B.wid[i];
+
+                // colors: dark at the root, bright at the tip; bent blades catch more light (the silvery wave)
+                const hi = Math.min(1, bend * 0.45);
+                const r = B.r[i], gg = B.g[i], b = B.b[i];
+
+                const vert = (k, side) => {
+                    const hw = k < SEGMENTS ? halfW[k] * side : 0;
+                    pos[o] = px[k] + wx * hw; pos[o + 1] = py[k] + wy * hw; pos[o + 2] = pz[k]; pos[o + 3] = 1;
+                    const h = k / SEGMENTS;
+                    const shade = 0.42 + 0.7 * h;
+                    const lift = hi * h * 0.55;
+                    col[o] = Math.min(1, r * shade + lift * 0.55);
+                    col[o + 1] = Math.min(1, gg * shade + lift * 0.5);
+                    col[o + 2] = Math.min(1, b * shade + lift * 0.22);
+                    col[o + 3] = 1;
+                    o += 4;
+                };
+                // two quads up the blade, then the tip triangle
+                vert(0, -1); vert(0, 1); vert(1, 1);
+                vert(0, -1); vert(1, 1); vert(1, -1);
+                vert(1, -1); vert(1, 1); vert(2, 1);
+                vert(1, -1); vert(2, 1); vert(2, -1);
+                vert(2, -1); vert(2, 1); vert(3, 0);
+            }
+
+            // flowers ride on their blade's tip, so they sway with it
+            for (const f of flowers) {
+                const cx = tipX[f.blade], cy = tipY[f.blade], cz = tipZ[f.blade];
+                const s = f.size, [r, g, b] = f.color;
+                const quad = (ax, ay) => {
+                    const pts = [
+                        [cx - ax * s, cy - ay * s, cz], [cx, cy, cz - s * 0.7], [cx + ax * s, cy + ay * s, cz],
+                        [cx - ax * s, cy - ay * s, cz], [cx + ax * s, cy + ay * s, cz], [cx, cy, cz + s * 0.7],
+                    ];
+                    for (let k = 0; k < 6; k++) {
+                        const p = pts[k];
+                        pos[o] = p[0]; pos[o + 1] = p[1]; pos[o + 2] = p[2]; pos[o + 3] = 1;
+                        const c = k === 1 ? 0.75 : 1;
+                        col[o] = r * c; col[o + 1] = g * c; col[o + 2] = b * c; col[o + 3] = 1;
+                        o += 4;
+                    }
+                };
+                quad(1, 0);
+                quad(0, 1);
+            }
+            return o;
+        }
+
+        // ------------------------------------------------------------------ bunny
+        //
+        // The bunny is built from ellipsoids (body, belly, ears, eyes, feet, ...). Every frame each part gets a
+        // new position, rotation and size from the animation state, and all parts go through one shared
+        // character transform: squash & stretch → forward lean → turn to face the walking direction → place
+        // on the terrain.
+
+        const CHAR_SCALE = 0.95;
+        const WALK_SPEED = 6.5;
+        const JUMP_SPEED = 10;
+        const GRAVITY = 30;
+        const PUSH_RADIUS = 2.4;
+        const PUSH_STRENGTH = 2.2;
+
+        const COL = {
+            fur: [1.0, 0.74, 0.5],
+            belly: [1.0, 0.93, 0.8],
+            feet: [0.94, 0.6, 0.4],
+            innerEar: [1.0, 0.6, 0.66],
+            eye: [0.07, 0.05, 0.08],
+            shine: [1, 1, 1],
+            cheek: [1.0, 0.56, 0.62],
+            nose: [0.86, 0.34, 0.44],
+            tail: [1.0, 0.97, 0.94],
+        };
+
+        function makeSphere(nLon, nLat) {
+            const v = [];
+            for (let i = 0; i <= nLat; i++) {
+                const th = (Math.PI * i) / nLat;
+                for (let j = 0; j <= nLon; j++) {
+                    const ph = (2 * Math.PI * j) / nLon;
+                    v.push(Math.sin(th) * Math.cos(ph), Math.sin(th) * Math.sin(ph), Math.cos(th));
+                }
+            }
+            const idx = [];
+            for (let i = 0; i < nLat; i++) {
+                for (let j = 0; j < nLon; j++) {
+                    const a = i * (nLon + 1) + j, b = a + nLon + 1;
+                    idx.push(a, b, a + 1, a + 1, b, b + 1);
+                }
+            }
+            return { v: Float32Array.from(v), idx: Uint16Array.from(idx) };
+        }
+        const SPHERE_HI = makeSphere(22, 14);
+        const SPHERE_LO = makeSphere(10, 6);
+
+        // 3×3 rotation matrices, row-major
+        const rotX = (a) => { const c = Math.cos(a), s = Math.sin(a); return [1, 0, 0, 0, c, -s, 0, s, c]; };
+        const rotY = (a) => { const c = Math.cos(a), s = Math.sin(a); return [c, 0, s, 0, 1, 0, -s, 0, c]; };
+        const rotZ = (a) => { const c = Math.cos(a), s = Math.sin(a); return [c, -s, 0, s, c, 0, 0, 0, 1]; };
+        const I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+        function mul(A, B) {
+            const R = new Array(9);
+            for (let r = 0; r < 3; r++)
+                for (let c = 0; c < 3; c++)
+                    R[3 * r + c] = A[3 * r] * B[c] + A[3 * r + 1] * B[3 + c] + A[3 * r + 2] * B[6 + c];
+            return R;
+        }
+        const apply = (M, x, y, z) => [
+            M[0] * x + M[1] * y + M[2] * z,
+            M[3] * x + M[4] * y + M[5] * z,
+            M[6] * x + M[7] * y + M[8] * z,
+        ];
+
+        // animation state
+        const C = {
+            x: 0, y: 0, vx: 0, vy: 0, yaw: 0,
+            z: 0, vz: 0, hop: 0,          // jump height / vertical speed / walking hop height
+            phase: 0, walk: 0,            // walk cycle and how much we are walking (0 idle … 1 full speed)
+            ear: 0.15, earV: 0,           // ear angle on a spring, so they flop and lag behind
+            land: 0,                      // landing squash, decays after touching down
+            blinkIn: 2, blink: 1,         // seconds until next blink, eye openness
+        };
+
+        // Parts in the bunny's local frame: x forward, y left, z up, origin between the feet.
+        // Each part: centre c, rotation R, radii r, colour, mesh. The list always has the same length.
+        function bunnyParts(time) {
+            const w = C.walk, ph = C.phase;
+            const parts = [];
+            const add = (c, R, r, col, mesh = SPHERE_HI) => parts.push({ c, R, r, col, mesh });
+
+            add([0, 0, 1.25], I3, [1.15, 1.1, 1.2], COL.fur);                      // body/head
+            add([0.5, 0, 1.0], I3, [0.72, 0.78, 0.78], COL.belly);                 // belly patch
+            add([-1.12, Math.sin(time * 7) * 0.08 * (0.4 + w), 0.95], I3, [0.3, 0.3, 0.3], COL.tail, SPHERE_LO);
+            add([1.12, 0, 1.4], I3, [0.06, 0.09, 0.06], COL.nose, SPHERE_LO);
+
+            for (const s of [1, -1]) {                                              // s = +1 left, -1 right
+                // ears: pivot inside the head, tilt outwards, swing back with the spring angle
+                const earR = mul(rotY(-C.ear), rotX(-s * (0.28 + 0.08 * Math.sin(time * 1.7 + s))));
+                const pivot = [-0.15, s * 0.42, 2.2];
+                const ec = apply(earR, 0, 0, 0.72), ic = apply(earR, 0.08, 0, 0.72);
+                add([pivot[0] + ec[0], pivot[1] + ec[1], pivot[2] + ec[2]], earR, [0.16, 0.3, 0.8], COL.fur);
+                add([pivot[0] + ic[0], pivot[1] + ic[1], pivot[2] + ic[2]], earR, [0.1, 0.18, 0.6], COL.innerEar);
+
+                // eyes blink by squashing vertically; the shine disappears while closed
+                add([0.97, s * 0.4, 1.58], I3, [0.12, 0.15, 0.22 * C.blink], COL.eye);
+                const shine = C.blink > 0.5 ? 0.055 : 0.0001;
+                add([1.07, s * 0.35, 1.66], I3, [shine, shine, shine], COL.shine, SPHERE_LO);
+                add([0.84, s * 0.7, 1.32], I3, [0.1, 0.2, 0.13], COL.cheek, SPHERE_LO);
+
+                // little arms swing opposite to the feet
+                const armR = mul(rotY(s * Math.sin(ph) * 0.7 * w), rotX(-s * 0.5));
+                const ac = apply(armR, 0, 0, -0.22);
+                add([0.15 + ac[0], s * 1.0 + ac[1], 1.05 + ac[2]], armR, [0.2, 0.16, 0.3], COL.fur, SPHERE_LO);
+
+                // feet step forward/back and lift on alternate beats
+                const fx = 0.3 + s * 0.42 * Math.sin(ph) * w;
+                const lift = Math.max(0, s * Math.cos(ph)) * 0.28 * w;
+                add([fx, s * 0.48, 0.16 + lift], rotY(-s * Math.cos(ph) * 0.4 * w), [0.45, 0.28, 0.18], COL.feet, SPHERE_LO);
+            }
+            return parts;
+        }
+
+        const CHAR_CORNERS = bunnyParts(0).reduce((n, p) => n + p.mesh.idx.length, 0);
+        C.yaw = space.alpha;   // start facing the camera
+
+        const keys = new Set();
+        const KEYMAP = { KeyW: "f", ArrowUp: "f", KeyS: "b", ArrowDown: "b", KeyA: "l", ArrowLeft: "l", KeyD: "r", ArrowRight: "r", Space: "j" };
+        window.addEventListener("keydown", (e) => {
+            if (!KEYMAP[e.code] || e.target.tagName === "SELECT") return;
+            e.preventDefault();
+            keys.add(KEYMAP[e.code]);
+        });
+        window.addEventListener("keyup", (e) => keys.delete(KEYMAP[e.code]));
+        window.addEventListener("blur", () => keys.clear());
+
+        const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+        function updateBunny(dt, time) {
+            // move relative to the camera: W = away from the camera, D = towards screen-right
+            space.updateMyVectors();
+            const f = normalize([space.zUnitVec[0], space.zUnitVec[1], 0]);
+            const r = normalize([space.xUnitVec[0], space.xUnitVec[1], 0]);
+            let mx = 0, my = 0;
+            if (keys.has("f")) { mx += f[0]; my += f[1]; }
+            if (keys.has("b")) { mx -= f[0]; my -= f[1]; }
+            if (keys.has("r")) { mx += r[0]; my += r[1]; }
+            if (keys.has("l")) { mx -= r[0]; my -= r[1]; }
+            const m = Math.hypot(mx, my);
+            const tx = m ? (mx / m) * WALK_SPEED : 0, ty = m ? (my / m) * WALK_SPEED : 0;
+            const ease = Math.min(1, dt * 10);
+            C.vx += (tx - C.vx) * ease;
+            C.vy += (ty - C.vy) * ease;
+            const lim = FIELD - 2;
+            C.x = Math.max(-lim, Math.min(lim, C.x + C.vx * dt));
+            C.y = Math.max(-lim, Math.min(lim, C.y + C.vy * dt));
+
+            const speed = Math.hypot(C.vx, C.vy);
+            C.walk += (Math.min(1, speed / WALK_SPEED) - C.walk) * Math.min(1, dt * 8);
+            if (speed > 0.3) C.yaw += wrapAngle(Math.atan2(C.vy, C.vx) - C.yaw) * Math.min(1, dt * 10);
+
+            // hop cycle while walking
+            C.phase += dt * 11 * C.walk;
+            C.hop = Math.abs(Math.sin(C.phase)) * 0.45 * C.walk;
+
+            // jump
+            const grounded = C.z <= 0;
+            if (keys.has("j") && grounded) C.vz = JUMP_SPEED;
+            C.vz -= GRAVITY * dt;
+            C.z += C.vz * dt;
+            if (C.z <= 0) {
+                if (C.vz < -4) C.land = Math.min(0.9, -C.vz / 14);
+                C.z = 0; C.vz = 0;
+            }
+            C.land *= Math.exp(-dt * 9);
+
+            // ears: damped spring towards a target that leans back when walking and flips up/down in jumps
+            const earTarget = 0.12 + 0.4 * C.walk + 0.1 * Math.cos(2 * C.phase) * C.walk - 0.035 * C.vz;
+            C.earV += ((earTarget - C.ear) * 70 - C.earV * 7) * dt;
+            C.ear += C.earV * dt;
+
+            // blink every few seconds
+            C.blinkIn -= dt;
+            if (C.blinkIn < 0) { C.blinkIn = 1.8 + Math.random() * 3.2; C.blinkT = 0.14; }
+            if (C.blinkT > 0) { C.blinkT -= dt; C.blink = 0.08; } else C.blink = 1;
+
+            // camera follows smoothly
+            if (followEl.checked) {
+                const k = Math.min(1, dt * 4);
+                space.X0 += (C.x - space.X0) * k;
+                space.Y0 += (C.y - space.Y0) * k;
+                space.Z0 += (height(C.x, C.y) + 1.6 - space.Z0) * k;
+                syncCamera();
+            }
+        }
+
+        function writeBunny(o, time) {
+            const w = C.walk, hopS = Math.abs(Math.sin(C.phase));
+            // squash & stretch: stretch mid-hop, squash on landing, gentle breathing when idle
+            let sz = 1 + w * (0.1 * hopS - 0.12 * Math.pow(1 - hopS, 4))
+                + 0.03 * Math.sin(time * 2.4) * (1 - w)
+                - 0.3 * C.land
+                + Math.max(-0.12, Math.min(0.15, C.vz * 0.012));
+            const sxy = 1 / Math.sqrt(sz);                      // keep the volume roughly constant
+            const S = [sxy * CHAR_SCALE, sxy * CHAR_SCALE, sz * CHAR_SCALE];
+
+            // idle: glance around; walking: lean into the step
+            const look = (1 - w) * 0.35 * Math.sin(time * 0.6) * Math.sin(time * 0.23 + 1);
+            const G = mul(rotZ(C.yaw + look), rotY(0.2 * w - 0.02 * C.vz));
+            const base = [C.x, C.y, height(C.x, C.y) - 0.05 + C.z + C.hop];
+
+            for (const p of bunnyParts(time)) {
+                const { v, idx } = p.mesh;
+                const [cr, cg, cb] = p.col;
+                for (let k = 0; k < idx.length; k++, o += 4) {
+                    const q = 3 * idx[k];
+                    const ux = v[q], uy = v[q + 1], uz = v[q + 2];
+                    // position: unit sphere → radii → part rotation → part centre → squash → character transform
+                    const lp = apply(p.R, ux * p.r[0], uy * p.r[1], uz * p.r[2]);
+                    const wp = apply(G, (p.c[0] + lp[0]) * S[0], (p.c[1] + lp[1]) * S[1], (p.c[2] + lp[2]) * S[2]);
+                    pos[o] = base[0] + wp[0]; pos[o + 1] = base[1] + wp[1]; pos[o + 2] = base[2] + wp[2]; pos[o + 3] = 1;
+                    // normal: inverse-transpose of the same chain (rotations stay, scales invert)
+                    const ln = apply(p.R, ux / p.r[0], uy / p.r[1], uz / p.r[2]);
+                    const wn = normalize(apply(G, ln[0] / S[0], ln[1] / S[1], ln[2] / S[2]));
+                    const d = 0.5 + 0.5 * (wn[0] * LIGHT[0] + wn[1] * LIGHT[1] + wn[2] * LIGHT[2]);
+                    const shade = 0.36 + 0.78 * d * d;
+                    col[o] = Math.min(1, cr * shade); col[o + 1] = Math.min(1, cg * shade); col[o + 2] = Math.min(1, cb * shade); col[o + 3] = 1;
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------ custom shader (test)
+        //
+        // Same attributes, uniforms and projection maths as Space.js's shader, so Space.reDraw() can drive it
+        // unchanged. On top, the fragment shader adds per-pixel distance fog and drifting cloud shadows.
+
+        const GRASS_VERT = `
+        attribute vec4 pos;
+        attribute vec4 col;
+        uniform vec3 cPoint;
+        uniform vec3 xAxis;
+        uniform vec3 yAxis;
+        uniform vec3 zAxis;
+        uniform vec3 veriables;      // (zShifter, magnifier, unused) — name kept so Space sets it
+
+        varying vec4 vcol;
+        varying float vDepth;         // distance in front of the camera
+        varying vec2 vGround;         // world x/y, for the cloud shadow pattern
+
+        void main() {
+            vcol = col;
+            vec3 d = pos.xyz - cPoint;
+            float xProj = dot(d, xAxis);
+            float yProj = dot(d, yAxis);
+            float zProj = dot(d, zAxis);
+            vDepth = zProj;
+            vGround = pos.xy;
+
+            // identical to Space.js's projection
+            float maxWidth = abs(zProj * 0.1 / veriables.y);
+            gl_Position = vec4(xProj / (maxWidth * 16.0), yProj / (maxWidth * 8.0), zProj / 800.0 - veriables.x, 1.0);
+        }`;
+
+        const GRASS_FRAG = `
+        precision mediump float;
+        varying vec4 vcol;
+        varying float vDepth;
+        varying vec2 vGround;
+
+        uniform vec3 fogColor;
+        uniform vec2 fogRange;        // (start, end) depth
+        uniform float time;
+
+        void main() {
+            vec3 c = vcol.rgb;
+
+            // two slow, crossing waves make soft cloud shadows that drift across the field
+            float cloud = sin(vGround.x * 0.07 + time * 0.35) * sin(vGround.y * 0.06 - time * 0.22)
+                        + 0.5 * sin((vGround.x + vGround.y) * 0.11 + time * 0.5);
+            c *= mix(0.72, 1.06, smoothstep(-0.6, 0.6, cloud));
+
+            // distance fog: far hills fade into the sky
+            float f = smoothstep(fogRange.x, fogRange.y, vDepth);
+            gl_FragColor = vec4(mix(c, fogColor, f * 0.85), 1.0);
+        }`;
+
+        function compileProgram(vsSrc, fsSrc) {
+            const make = (type, src) => {
+                const s = gl.createShader(type);
+                gl.shaderSource(s, src);
+                gl.compileShader(s);
+                if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+                return s;
+            };
+            const p = gl.createProgram();
+            gl.attachShader(p, make(gl.VERTEX_SHADER, vsSrc));
+            gl.attachShader(p, make(gl.FRAGMENT_SHADER, fsSrc));
+            // keep the attribute slots Space already wired its buffers to
+            gl.bindAttribLocation(p, space.posId, "pos");
+            gl.bindAttribLocation(p, space.colId, "col");
+            gl.linkProgram(p);
+            if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+            return p;
+        }
+
+        // the uniform locations Space.reDraw() uses, for a given program
+        const locationsFor = (p) => ({
+            program: p,
+            cPointLoc: gl.getUniformLocation(p, "cPoint"),
+            vPointLoc: gl.getUniformLocation(p, "vPoint"),
+            xAxisLoc: gl.getUniformLocation(p, "xAxis"),
+            yAxisLoc: gl.getUniformLocation(p, "yAxis"),
+            zAxisLoc: gl.getUniformLocation(p, "zAxis"),
+            varsLocation: gl.getUniformLocation(p, "veriables"),
+        });
+
+        const libraryShader = locationsFor(space.program);
+        let customShader = null;
+        try {
+            const p = compileProgram(GRASS_VERT, GRASS_FRAG);
+            customShader = {
+                ...locationsFor(p),
+                fogColor: gl.getUniformLocation(p, "fogColor"),
+                fogRange: gl.getUniformLocation(p, "fogRange"),
+                time: gl.getUniformLocation(p, "time"),
+            };
+        } catch (err) {
+            console.error("custom shader failed:", err);
+            customShaderEl.checked = false;
+            customShaderEl.disabled = true;
+        }
+
+        function useShader(s) {
+            Object.assign(space, s);          // point Space at this program's uniform locations
+            gl.useProgram(s.program);
+            gl.uniform3fv(s.varsLocation, new Float32Array([space.zShifter, space.magnifier, 0]));
+        }
+
+        function applyShaderChoice() {
+            useShader(customShaderEl.checked && customShader ? customShader : libraryShader);
+        }
+        customShaderEl.addEventListener("change", applyShaderChoice);
+        applyShaderChoice();
+
+        function updateCustomUniforms(time) {
+            if (space.program !== customShader?.program) return;
+            gl.uniform3fv(customShader.fogColor, new Float32Array(SKY));
+            gl.uniform2fv(customShader.fogRange, new Float32Array([space.Rc + 10, space.Rc + 75]));
+            gl.uniform1f(customShader.time, time);
+        }
+
+        // ------------------------------------------------------------------ loop
+
+        let t = 0, time = 0, last = performance.now(), paused = false;
+        let frames = 0, fpsTime = last;
+
+        function frame(now) {
+            const dt = Math.min(0.1, (now - last) / 1000);
+            last = now;
+            if (!paused) t += dt * +gustEl.value;
+            time += dt;
+
+            updateBunny(dt, time);
+            writeBunny(writeBlades(t), time);
+            updateCustomUniforms(time);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            space.reDraw();
+
+            frames++;
+            if (now - fpsTime > 500) {
+                const fps = Math.round((frames * 1000) / (now - fpsTime));
+                frames = 0; fpsTime = now;
+                infoEl.textContent = infoEl.dataset.tris + " triangles · " + fps + " fps";
+            }
+            requestAnimationFrame(frame);
+        }
+
+        countEl.addEventListener("change", () => buildScene(+countEl.value));
+        pauseEl.addEventListener("click", () => {
+            paused = !paused;
+            pauseEl.textContent = paused ? "Play" : "Pause";
+        });
+
+        buildScene(+countEl.value);
+        requestAnimationFrame(frame);
+    </script>
+</body>
+
+</html>
