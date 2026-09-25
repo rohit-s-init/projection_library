@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OBJ Preview</title>
+    <style>
+        :root {
+            --bg: #0b0d12;
+            --panel: rgba(20, 23, 31, 0.92);
+            --border: #2a2f3b;
+            --text: #d8dce6;
+            --muted: #8a91a3;
+            --accent: #5aa9ff;
+        }
+
+        * { box-sizing: border-box; }
+
+        html, body {
+            margin: 0;
+            height: 100%;
+            background: var(--bg);
+            color: var(--text);
+            font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+            overflow: hidden;
+        }
+
+        #stage {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Space's shader scales x by 1/16 and y by 1/8, so the canvas must be 2:1 */
+        #view {
+            display: block;
+            touch-action: none;
+            cursor: grab;
+        }
+
+        #view.dragging { cursor: grabbing; }
+
+        #panel {
+            position: fixed;
+            top: 12px;
+            left: 12px;
+            width: 280px;
+            max-height: calc(100% - 24px);
+            overflow-y: auto;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px;
+            backdrop-filter: blur(6px);
+        }
+
+        h1 {
+            font-size: 15px;
+            margin: 0 0 10px;
+            font-weight: 600;
+        }
+
+        .btn {
+            display: inline-block;
+            background: var(--accent);
+            color: #051019;
+            border: 0;
+            border-radius: 6px;
+            padding: 7px 12px;
+            font: inherit;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .btn.secondary {
+            background: transparent;
+            color: var(--text);
+            border: 1px solid var(--border);
+            font-weight: 500;
+        }
+
+        .row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 10px 0;
+        }
+
+        select {
+            background: #10131a;
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            padding: 4px 6px;
+            font: inherit;
+        }
+
+        .hint { color: var(--muted); font-size: 12px; }
+
+        #status { margin-top: 10px; white-space: pre-wrap; }
+        #status.error { color: #ff7b7b; }
+        #status .warn { color: #f3c969; }
+
+        #stats {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 2px 10px;
+            margin-top: 10px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        #stats dt { color: var(--muted); }
+        #stats dd { margin: 0; }
+
+        #legend { margin-top: 12px; }
+        #legend h2 { font-size: 12px; color: var(--muted); font-weight: 600; margin: 0 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+
+        .mat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 2px 0;
+        }
+
+        .swatch {
+            width: 14px;
+            height: 14px;
+            border-radius: 3px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            flex: none;
+        }
+
+        .mat span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        #drop {
+            position: fixed;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(10, 30, 60, 0.6);
+            border: 3px dashed var(--accent);
+            font-size: 20px;
+            pointer-events: none;
+        }
+
+        body.dragover #drop { display: flex; }
+    </style>
+</head>
+
+<body>
+    <div id="stage"><canvas id="view"></canvas></div>
+
+    <div id="panel">
+        <h1>OBJ Preview</h1>
+        <label class="btn">
+            Open .obj
+            <input id="file" type="file" multiple accept=".obj,.mtl,image/*" hidden>
+        </label>
+        <button id="sample" class="btn secondary">Sample</button>
+        <p class="hint">Select the .obj together with its .mtl and texture images, or drop them all on the page.</p>
+
+        <div class="row">
+            <label for="upAxis">Up axis</label>
+            <select id="upAxis">
+                <option value="y">Y-up (most OBJ)</option>
+                <option value="z">Z-up (Blender/CAD)</option>
+            </select>
+        </div>
+        <div class="row">
+            <label><input id="lighting" type="checkbox" checked> Shading</label>
+            <button id="reset" class="btn secondary">Reset view</button>
+        </div>
+        <p class="hint">Drag to rotate · Shift/right-drag to pan · Wheel to zoom</p>
+
+        <div id="status"></div>
+        <dl id="stats"></dl>
+        <div id="legend"></div>
+    </div>
+
+    <div id="drop">Drop .obj / .mtl / textures</div>
+
+    <script type="module">
+        import Space from "./Space.js";
+
+        const BG = [0.043, 0.051, 0.071];
+        const FIT_SIZE = 34;       // largest model dimension after normalisation (camera sits at Rc = 70)
+        const DEFAULT_RC = 70;
+        const DEFAULT_COLOR = [0.78, 0.78, 0.8];
+        const MAX_TEXTURE = 2048;
+
+        const canvas = document.getElementById("view");
+        const statusEl = document.getElementById("status");
+        const statsEl = document.getElementById("stats");
+        const legendEl = document.getElementById("legend");
+        const upAxisEl = document.getElementById("upAxis");
+        const lightingEl = document.getElementById("lighting");
+
+        sizeCanvas();
+        /** @type {WebGLRenderingContext} */
+        const gl = canvas.getContext("webgl", { alpha: false, antialias: true });
+        if (!gl) {
+            setStatus("WebGL is not available in this browser.", true);
+            throw new Error("no webgl");
+        }
+
+        const space = new Space(gl);
+        space.posArr = new Float32Array(0);
+        space.colArr = new Float32Array(0);
+        space.totalVert = 0;
+        gl.clearColor(BG[0], BG[1], BG[2], 1);
+
+        // Current model state: parsed OBJ, its materials and loaded textures
+        let model = null;
+
+        // ------------------------------------------------------------------ rendering
+
+        let drawPending = false;
+        function requestDraw() {
+            if (drawPending) return;
+            drawPending = true;
+            requestAnimationFrame(() => {
+                drawPending = false;
+                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                space.reDraw();
+            });
+        }
+
+        function sizeCanvas() {
+            const w = window.innerWidth, h = window.innerHeight;
+            let cw = w, ch = w / 2;
+            if (ch > h) { ch = h; cw = h * 2; }
+            const dpr = window.devicePixelRatio || 1;
+            canvas.style.width = cw + "px";
+            canvas.style.height = ch + "px";
+            canvas.width = Math.round(cw * dpr);
+            canvas.height = Math.round(ch * dpr);
+        }
+
+        window.addEventListener("resize", () => {
+            sizeCanvas();
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            requestDraw();
+        });
+
+        // ------------------------------------------------------------------ camera (same conventions as Space.js)
+
+        function syncCamera() {
+            space.beta = Math.max(-1.55, Math.min(1.55, space.beta));
+            space.Rc = Math.max(2, Math.min(700, space.Rc));
+            const a = space.alpha, b = space.beta, r = space.Rc;
+            space.Xc = space.X0 + Math.cos(b) * Math.cos(a) * r;
+            space.Yc = space.Y0 + Math.cos(b) * Math.sin(a) * r;
+            space.Zc = space.Z0 + Math.sin(b) * r;
+            requestDraw();
+        }
+
+        function resetView() {
+            space.X0 = space.Y0 = space.Z0 = 0;
+            space.alpha = Math.PI - 0.55;
+            space.beta = 0.35;
+            space.Rc = DEFAULT_RC;
+            syncCamera();
+        }
+
+        let drag = null;
+        canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+        canvas.addEventListener("pointerdown", (e) => {
+            canvas.setPointerCapture(e.pointerId);
+            canvas.classList.add("dragging");
+            drag = {
+                x: e.clientX, y: e.clientY,
+                pan: e.button === 2 || e.shiftKey,
+                alpha: space.alpha, beta: space.beta,
+                target: [space.X0, space.Y0, space.Z0],
+            };
+            space.updateMyVectors();
+        });
+        canvas.addEventListener("pointermove", (e) => {
+            if (!drag) return;
+            const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+            if (drag.pan) {
+                // world units per CSS pixel at the target's depth
+                const k = (1.6 * space.Rc / space.magnifier) / (canvas.clientWidth / 2);
+                const xa = space.xUnitVec, ya = space.yUnitVec;
+                space.X0 = drag.target[0] - (dx * xa[0] - dy * ya[0]) * k;
+                space.Y0 = drag.target[1] - (dx * xa[1] - dy * ya[1]) * k;
+                space.Z0 = drag.target[2] - (dx * xa[2] - dy * ya[2]) * k;
+            } else {
+                space.alpha = drag.alpha + dx / 250;
+                space.beta = drag.beta + dy / 250;
+            }
+            syncCamera();
+        });
+        const endDrag = () => { drag = null; canvas.classList.remove("dragging"); };
+        canvas.addEventListener("pointerup", endDrag);
+        canvas.addEventListener("pointercancel", endDrag);
+        canvas.addEventListener("wheel", (e) => {
+            e.preventDefault();
+            space.Rc *= Math.exp(e.deltaY * 0.0012);
+            syncCamera();
+        }, { passive: false });
+
+        document.getElementById("reset").addEventListener("click", resetView);
+
+        // ------------------------------------------------------------------ OBJ / MTL parsing
+
+        function resolveIndex(str, count) {
+            const i = parseInt(str, 10);
+            if (Number.isNaN(i)) return -1;
+            return i < 0 ? count + i : i - 1;
+        }
+
+        function parseOBJ(text) {
+            const positions = [];   // xyz per vertex
+            const vcolors = [];     // rgb per vertex, or null when the vertex has none
+            const uvs = [];
+            const normals = [];
+            let colorScale = 1;
+
+            // One entry per triangle corner
+            const cPos = [], cUV = [], cNrm = [], cVC = [];
+            const triMat = [];
+            const materialNames = [];
+            const materialIndex = new Map();
+            const mtllibs = [];
+            let currentMat = -1;
+            let hasVertexColors = false, hasUV = false, hasNormals = false;
+
+            const lines = text.split(/\r?\n/);
+            for (let li = 0; li < lines.length; li++) {
+                const line = lines[li].trim();
+                if (line === "" || line[0] === "#") continue;
+                const parts = line.split(/\s+/);
+                const kw = parts[0];
+
+                if (kw === "v") {
+                    positions.push(+parts[1], +parts[2], +parts[3]);
+                    if (parts.length >= 7) {
+                        const r = +parts[4], g = +parts[5], b = +parts[6];
+                        if (r > 1 || g > 1 || b > 1) colorScale = 1 / 255;
+                        vcolors.push([r, g, b]);
+                        hasVertexColors = true;
+                    } else {
+                        vcolors.push(null);
+                    }
+                } else if (kw === "vt") {
+                    uvs.push(+parts[1], +(parts[2] ?? 0));
+                } else if (kw === "vn") {
+                    normals.push(+parts[1], +parts[2], +parts[3]);
+                } else if (kw === "f") {
+                    const vCount = positions.length / 3, tCount = uvs.length / 2, nCount = normals.length / 3;
+                    const corners = [];
+                    for (let k = 1; k < parts.length; k++) {
+                        const [vs, ts, ns] = parts[k].split("/");
+                        const v = resolveIndex(vs, vCount);
+                        if (v < 0 || v >= vCount) continue;
+                        const t = ts ? resolveIndex(ts, tCount) : -1;
+                        const n = ns ? resolveIndex(ns, nCount) : -1;
+                        corners.push([v, t, n]);
+                    }
+                    // fan triangulation of polygons
+                    for (let k = 1; k + 1 < corners.length; k++) {
+                        for (const c of [corners[0], corners[k], corners[k + 1]]) {
+                            const [v, t, n] = c;
+                            cPos.push(positions[3 * v], positions[3 * v + 1], positions[3 * v + 2]);
+                            cVC.push(vcolors[v]);
+                            if (t >= 0) { cUV.push(uvs[2 * t], uvs[2 * t + 1]); hasUV = true; }
+                            else cUV.push(NaN, NaN);
+                            if (n >= 0) { cNrm.push(normals[3 * n], normals[3 * n + 1], normals[3 * n + 2]); hasNormals = true; }
+                            else cNrm.push(NaN, NaN, NaN);
+                        }
+                        triMat.push(currentMat);
+                    }
+                } else if (kw === "usemtl") {
+                    const name = line.slice(6).trim();
+                    if (!materialIndex.has(name)) {
+                        materialIndex.set(name, materialNames.length);
+                        materialNames.push(name);
+                    }
+                    currentMat = materialIndex.get(name);
+                } else if (kw === "mtllib") {
+                    mtllibs.push(line.slice(6).trim());
+                }
+            }
+
+            return {
+                vertexCount: positions.length / 3,
+                positions: Float32Array.from(cPos),
+                uvs: Float32Array.from(cUV),
+                normals: Float32Array.from(cNrm),
+                vertexColors: hasVertexColors
+                    ? cVC.map((c) => c && [c[0] * colorScale, c[1] * colorScale, c[2] * colorScale])
+                    : null,
+                triMat: Int32Array.from(triMat),
+                materialNames,
+                mtllibs,
+                hasUV,
+                hasNormals,
+            };
+        }
+
+        function parseMTL(text, into) {
+            let cur = null;
+            for (const raw of text.split(/\r?\n/)) {
+                const line = raw.trim();
+                if (line === "" || line[0] === "#") continue;
+                const parts = line.split(/\s+/);
+                const kw = parts[0].toLowerCase();
+                if (kw === "newmtl") {
+                    cur = { name: line.slice(6).trim(), Kd: null, Ka: null, map: null };
+                    into.set(cur.name, cur);
+                } else if (!cur) {
+                    continue;
+                } else if (kw === "kd" || kw === "ka") {
+                    const rgb = [+parts[1], +(parts[2] ?? parts[1]), +(parts[3] ?? parts[1])];
+                    if (rgb.every(Number.isFinite)) cur[kw === "kd" ? "Kd" : "Ka"] = rgb;
+                } else if (kw === "map_kd") {
+                    // options (-s, -o, ...) may precede the filename; the filename is last
+                    cur.map = baseName(parts[parts.length - 1]);
+                }
+            }
+            return into;
+        }
+
+        function baseName(path) {
+            return path.split(/[\\/]/).pop().toLowerCase();
+        }
+
+        async function loadTexture(file) {
+            const bitmap = await createImageBitmap(file);
+            const scale = Math.min(1, MAX_TEXTURE / Math.max(bitmap.width, bitmap.height));
+            const w = Math.max(1, Math.round(bitmap.width * scale));
+            const h = Math.max(1, Math.round(bitmap.height * scale));
+            const c = document.createElement("canvas");
+            c.width = w; c.height = h;
+            const ctx = c.getContext("2d", { willReadFrequently: true });
+            ctx.drawImage(bitmap, 0, 0, w, h);
+            return { w, h, data: ctx.getImageData(0, 0, w, h).data };
+        }
+
+        function sampleTexture(tex, u, v) {
+            u -= Math.floor(u);
+            v -= Math.floor(v);
+            const x = Math.min(tex.w - 1, Math.floor(u * tex.w));
+            const y = Math.min(tex.h - 1, Math.floor((1 - v) * tex.h));
+            const i = 4 * (y * tex.w + x);
+            return [tex.data[i] / 255, tex.data[i + 1] / 255, tex.data[i + 2] / 255];
+        }
+
+        // ------------------------------------------------------------------ building Space buffers
+
+        // Space renders with Z up and a mirrored x axis (screen-right = +Y when looking down +X),
+        // so these mappings are reflections that cancel that mirror and give a front view by default.
+        const AXIS_MAPS = {
+            y: (x, y, z) => [-z, x, y],
+            z: (x, y, z) => [y, x, z],
+        };
+
+        const LIGHTS = [
+            { dir: normalize([-0.45, 0.35, 0.82]), k: 0.6 },
+            { dir: normalize([0.6, -0.5, -0.25]), k: 0.22 },
+        ];
+        const AMBIENT = 0.32;
+
+        function normalize(v) {
+            const m = Math.hypot(v[0], v[1], v[2]) || 1;
+            return [v[0] / m, v[1] / m, v[2] / m];
+        }
+
+        function computeBaseColors(obj, materials, textures) {
+            const corners = obj.positions.length / 3;
+            const base = new Float32Array(corners * 3);
+            const counts = { vertex: 0, texture: 0, material: 0, none: 0 };
+            const matList = obj.materialNames.map((n) => materials.get(n) || null);
+
+            for (let c = 0; c < corners; c++) {
+                let rgb = null;
+                const vc = obj.vertexColors && obj.vertexColors[c];
+                if (vc) {
+                    rgb = vc; counts.vertex++;
+                } else {
+                    const mi = obj.triMat[(c / 3) | 0];
+                    const mat = mi >= 0 ? matList[mi] : null;
+                    const tex = mat && mat.map ? textures.get(mat.map) : null;
+                    const u = obj.uvs[2 * c], v = obj.uvs[2 * c + 1];
+                    if (tex && Number.isFinite(u)) {
+                        rgb = sampleTexture(tex, u, v); counts.texture++;
+                    } else if (mat && (mat.Kd || mat.Ka)) {
+                        rgb = mat.Kd || mat.Ka; counts.material++;
+                    } else {
+                        rgb = DEFAULT_COLOR; counts.none++;
+                    }
+                }
+                base[3 * c] = rgb[0]; base[3 * c + 1] = rgb[1]; base[3 * c + 2] = rgb[2];
+            }
+            return { base, counts, matList };
+        }
+
+        function buildGeometry(obj, upAxis) {
+            const p = obj.positions;
+            const corners = p.length / 3;
+            let min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+            for (let i = 0; i < p.length; i += 3) {
+                for (let a = 0; a < 3; a++) {
+                    if (p[i + a] < min[a]) min[a] = p[i + a];
+                    if (p[i + a] > max[a]) max[a] = p[i + a];
+                }
+            }
+            const center = [0, 1, 2].map((a) => (min[a] + max[a]) / 2);
+            const size = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]) || 1;
+            const s = FIT_SIZE / size;
+            const map = AXIS_MAPS[upAxis];
+
+            const pos = new Float32Array(corners * 4);
+            const nrm = new Float32Array(corners * 3);
+            for (let c = 0; c < corners; c++) {
+                const w = map((p[3 * c] - center[0]) * s, (p[3 * c + 1] - center[1]) * s, (p[3 * c + 2] - center[2]) * s);
+                pos[4 * c] = w[0]; pos[4 * c + 1] = w[1]; pos[4 * c + 2] = w[2]; pos[4 * c + 3] = 1;
+            }
+            // per-corner normals: file normals when every corner of the triangle has one, else the face normal
+            for (let t = 0; t < corners; t += 3) {
+                const i0 = 4 * t, i1 = i0 + 4, i2 = i0 + 8;
+                const e1 = [pos[i1] - pos[i0], pos[i1 + 1] - pos[i0 + 1], pos[i1 + 2] - pos[i0 + 2]];
+                const e2 = [pos[i2] - pos[i0], pos[i2 + 1] - pos[i0 + 1], pos[i2 + 2] - pos[i0 + 2]];
+                const fn = normalize([
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ]);
+                const fileN = obj.hasNormals && [0, 1, 2].every((k) => Number.isFinite(obj.normals[3 * (t + k)]));
+                for (let k = 0; k < 3; k++) {
+                    const n = fileN
+                        ? normalize(map(obj.normals[3 * (t + k)], obj.normals[3 * (t + k) + 1], obj.normals[3 * (t + k) + 2]))
+                        : fn;
+                    nrm[3 * (t + k)] = n[0]; nrm[3 * (t + k) + 1] = n[1]; nrm[3 * (t + k) + 2] = n[2];
+                }
+            }
+            return { pos, nrm };
+        }
+
+        function bakeColors(base, nrm, shaded) {
+            const corners = base.length / 3;
+            const col = new Float32Array(corners * 4);
+            for (let c = 0; c < corners; c++) {
+                let f = 1;
+                if (shaded) {
+                    const nx = nrm[3 * c], ny = nrm[3 * c + 1], nz = nrm[3 * c + 2];
+                    f = AMBIENT;
+                    // two-sided: winding in OBJ files is unreliable
+                    for (const L of LIGHTS) f += L.k * Math.abs(nx * L.dir[0] + ny * L.dir[1] + nz * L.dir[2]);
+                }
+                col[4 * c] = Math.min(1, base[3 * c] * f);
+                col[4 * c + 1] = Math.min(1, base[3 * c + 1] * f);
+                col[4 * c + 2] = Math.min(1, base[3 * c + 2] * f);
+                col[4 * c + 3] = 1;
+            }
+            return col;
+        }
+
+        function applyModel() {
+            if (!model) return;
+            const geo = buildGeometry(model.obj, upAxisEl.value);
+            model.nrm = geo.nrm;
+            space.posArr = geo.pos;
+            space.colArr = bakeColors(model.base, geo.nrm, lightingEl.checked);
+            space.totalVert = geo.pos.length / 4;
+            requestDraw();
+        }
+
+        upAxisEl.addEventListener("change", () => { applyModel(); resetView(); });
+        lightingEl.addEventListener("change", () => {
+            if (!model) return;
+            space.colArr = bakeColors(model.base, model.nrm, lightingEl.checked);
+            requestDraw();
+        });
+
+        // ------------------------------------------------------------------ loading files
+
+        async function loadFiles(fileList) {
+            const files = [...fileList];
+            const objFile = files.find((f) => /\.obj$/i.test(f.name));
+            if (!objFile) {
+                setStatus("No .obj file in the selection.", true);
+                return;
+            }
+            setStatus("Loading " + objFile.name + "…");
+            try {
+                const materials = new Map();
+                for (const f of files.filter((f) => /\.mtl$/i.test(f.name))) parseMTL(await f.text(), materials);
+
+                const textures = new Map();
+                for (const f of files.filter((f) => f.type.startsWith("image/") || /\.(png|jpe?g|bmp|gif|webp|tga)$/i.test(f.name))) {
+                    try { textures.set(f.name.toLowerCase(), await loadTexture(f)); }
+                    catch { /* unsupported image format (e.g. TGA) — falls back to Kd */ }
+                }
+
+                const obj = parseOBJ(await objFile.text());
+                showModel(objFile.name, obj, materials, textures);
+            } catch (err) {
+                console.error(err);
+                setStatus("Failed to load: " + err.message, true);
+            }
+        }
+
+        function showModel(name, obj, materials, textures) {
+            if (obj.positions.length === 0) {
+                setStatus(name + " has no faces to render.", true);
+                return;
+            }
+            const { base, counts, matList } = computeBaseColors(obj, materials, textures);
+            model = { obj, base, nrm: null };
+            applyModel();
+            resetView();
+
+            const warnings = [];
+            if (obj.mtllibs.length && materials.size === 0)
+                warnings.push("References " + obj.mtllibs.join(", ") + " — select it with the .obj to get material colors.");
+            const missingMats = obj.materialNames.filter((n) => !materials.has(n));
+            if (materials.size && missingMats.length)
+                warnings.push(missingMats.length + " material(s) not found in the .mtl.");
+            const missingTex = [...new Set(matList.filter((m) => m && m.map && !textures.has(m.map)).map((m) => m.map))];
+            if (missingTex.length)
+                warnings.push("Texture(s) not provided: " + missingTex.join(", ") + " (using Kd color).");
+
+            statusEl.className = "";
+            statusEl.innerHTML = "";
+            statusEl.append("Loaded " + name);
+            for (const w of warnings) {
+                const d = document.createElement("div");
+                d.className = "warn";
+                d.textContent = "⚠ " + w;
+                statusEl.append(d);
+            }
+
+            const corners = obj.positions.length / 3;
+            const pct = (n) => n ? Math.round((100 * n) / corners) + "%" : "–";
+            renderStats([
+                ["Vertices", obj.vertexCount.toLocaleString()],
+                ["Triangles", (corners / 3).toLocaleString()],
+                ["Materials", obj.materialNames.length],
+                ["Vertex colors", pct(counts.vertex)],
+                ["Texture colors", pct(counts.texture)],
+                ["Material colors", pct(counts.material)],
+                ["Uncolored", pct(counts.none)],
+            ]);
+            renderLegend(obj.materialNames, materials, textures);
+        }
+
+        function renderStats(rows) {
+            statsEl.innerHTML = "";
+            for (const [k, v] of rows) {
+                const dt = document.createElement("dt"); dt.textContent = k;
+                const dd = document.createElement("dd"); dd.textContent = v;
+                statsEl.append(dt, dd);
+            }
+        }
+
+        function renderLegend(names, materials, textures) {
+            legendEl.innerHTML = "";
+            if (!names.length) return;
+            const h = document.createElement("h2");
+            h.textContent = "Materials";
+            legendEl.append(h);
+            for (const n of names.slice(0, 60)) {
+                const m = materials.get(n);
+                const rgb = (m && (m.Kd || m.Ka)) || null;
+                const row = document.createElement("div");
+                row.className = "mat";
+                const sw = document.createElement("span");
+                sw.className = "swatch";
+                sw.style.background = rgb
+                    ? `rgb(${rgb.map((x) => Math.round(Math.min(1, x) * 255)).join(",")})`
+                    : "repeating-linear-gradient(45deg,#444 0 3px,#222 3px 6px)";
+                const label = document.createElement("span");
+                label.textContent = n + (m && m.map ? (textures.has(m.map) ? "  (texture)" : "  (texture missing)") : "") + (m ? "" : "  (undefined)");
+                row.append(sw, label);
+                legendEl.append(row);
+            }
+            if (names.length > 60) {
+                const more = document.createElement("div");
+                more.className = "hint";
+                more.textContent = "+ " + (names.length - 60) + " more";
+                legendEl.append(more);
+            }
+        }
+
+        function setStatus(msg, isError = false) {
+            statusEl.className = isError ? "error" : "";
+            statusEl.textContent = msg;
+        }
+
+        document.getElementById("file").addEventListener("change", (e) => {
+            if (e.target.files.length) loadFiles(e.target.files);
+            e.target.value = "";
+        });
+
+        let dragDepth = 0;
+        window.addEventListener("dragenter", (e) => { e.preventDefault(); dragDepth++; document.body.classList.add("dragover"); });
+        window.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove("dragover"); } });
+        window.addEventListener("dragover", (e) => e.preventDefault());
+        window.addEventListener("drop", (e) => {
+            e.preventDefault();
+            dragDepth = 0;
+            document.body.classList.remove("dragover");
+            if (e.dataTransfer.files.length) loadFiles(e.dataTransfer.files);
+        });
+
+        // ------------------------------------------------------------------ built-in sample
+
+        const SAMPLE_MTL = `
+newmtl red
+Kd 0.9 0.2 0.2
+newmtl green
+Kd 0.2 0.8 0.3
+newmtl blue
+Kd 0.2 0.4 0.95
+newmtl yellow
+Kd 0.95 0.85 0.2
+newmtl orange
+Kd 1.0 0.55 0.1
+newmtl white
+Kd 0.92 0.92 0.92
+`;
+        const SAMPLE_OBJ = `
+# cube colored by materials (usemtl), octahedron colored by vertex colors
+mtllib sample.mtl
+v -2.8 -1 -1
+v -0.8 -1 -1
+v -0.8  1 -1
+v -2.8  1 -1
+v -2.8 -1  1
+v -0.8 -1  1
+v -0.8  1  1
+v -2.8  1  1
+v 1.8  1.4 0     1.0 0.2 0.2
+v 1.8 -1.4 0     0.2 0.4 1.0
+v 3.2  0   0     1.0 0.85 0.1
+v 0.4  0   0     0.2 0.9 0.4
+v 1.8  0   1.4   0.8 0.3 1.0
+v 1.8  0  -1.4   0.1 0.9 0.9
+usemtl blue
+f 1 4 3 2
+usemtl green
+f 5 6 7 8
+usemtl red
+f 1 2 6 5
+usemtl yellow
+f 4 8 7 3
+usemtl orange
+f 1 5 8 4
+usemtl white
+f 2 3 7 6
+f 9 11 13
+f 9 13 12
+f 9 12 14
+f 9 14 11
+f 10 13 11
+f 10 12 13
+f 10 14 12
+f 10 11 14
+`;
+
+        function loadSample() {
+            loadFiles([
+                new File([SAMPLE_OBJ], "sample.obj"),
+                new File([SAMPLE_MTL], "sample.mtl"),
+            ]);
+        }
+        document.getElementById("sample").addEventListener("click", loadSample);
+
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        loadSample();
+    </script>
+</body>
+
+</html>
