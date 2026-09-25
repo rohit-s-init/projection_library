@@ -171,6 +171,14 @@
             </select>
         </div>
         <div class="row">
+            <label for="material">Material</label>
+            <select id="material">
+                <option value="file">File colors</option>
+                <option value="steel">Polished steel</option>
+                <option value="tinted">Steel tinted by file colors</option>
+            </select>
+        </div>
+        <div class="row">
             <label><input id="lighting" type="checkbox" checked> Shading</label>
             <button id="reset" class="btn secondary">Reset view</button>
         </div>
@@ -198,6 +206,7 @@
         const legendEl = document.getElementById("legend");
         const upAxisEl = document.getElementById("upAxis");
         const lightingEl = document.getElementById("lighting");
+        const materialEl = document.getElementById("material");
 
         sizeCanvas();
         /** @type {WebGLRenderingContext} */
@@ -322,7 +331,7 @@
             let colorScale = 1;
 
             // One entry per triangle corner
-            const cPos = [], cUV = [], cNrm = [], cVC = [];
+            const cPos = [], cUV = [], cNrm = [], cVC = [], cVi = [];
             const triMat = [];
             const materialNames = [];
             const materialIndex = new Map();
@@ -367,6 +376,7 @@
                         for (const c of [corners[0], corners[k], corners[k + 1]]) {
                             const [v, t, n] = c;
                             cPos.push(positions[3 * v], positions[3 * v + 1], positions[3 * v + 2]);
+                            cVi.push(v);
                             cVC.push(vcolors[v]);
                             if (t >= 0) { cUV.push(uvs[2 * t], uvs[2 * t + 1]); hasUV = true; }
                             else cUV.push(NaN, NaN);
@@ -390,6 +400,7 @@
             return {
                 vertexCount: positions.length / 3,
                 positions: Float32Array.from(cPos),
+                vertexIndex: Int32Array.from(cVi),     // which OBJ vertex each corner came from
                 uvs: Float32Array.from(cUV),
                 normals: Float32Array.from(cNrm),
                 vertexColors: hasVertexColors
@@ -521,23 +532,45 @@
                 const w = map((p[3 * c] - center[0]) * s, (p[3 * c + 1] - center[1]) * s, (p[3 * c + 2] - center[2]) * s);
                 pos[4 * c] = w[0]; pos[4 * c + 1] = w[1]; pos[4 * c + 2] = w[2]; pos[4 * c + 3] = 1;
             }
-            // per-corner normals: file normals when every corner of the triangle has one, else the face normal
-            for (let t = 0; t < corners; t += 3) {
-                const i0 = 4 * t, i1 = i0 + 4, i2 = i0 + 8;
+            // face normals
+            const tris = corners / 3;
+            const fn = new Float32Array(tris * 3);
+            for (let t = 0; t < tris; t++) {
+                const i0 = 12 * t, i1 = i0 + 4, i2 = i0 + 8;
                 const e1 = [pos[i1] - pos[i0], pos[i1 + 1] - pos[i0 + 1], pos[i1 + 2] - pos[i0 + 2]];
                 const e2 = [pos[i2] - pos[i0], pos[i2 + 1] - pos[i0 + 1], pos[i2 + 2] - pos[i0 + 2]];
-                const fn = normalize([
-                    e1[1] * e2[2] - e1[2] * e2[1],
-                    e1[2] * e2[0] - e1[0] * e2[2],
-                    e1[0] * e2[1] - e1[1] * e2[0],
-                ]);
-                const fileN = obj.hasNormals && [0, 1, 2].every((k) => Number.isFinite(obj.normals[3 * (t + k)]));
-                for (let k = 0; k < 3; k++) {
-                    const n = fileN
-                        ? normalize(map(obj.normals[3 * (t + k)], obj.normals[3 * (t + k) + 1], obj.normals[3 * (t + k) + 2]))
-                        : fn;
-                    nrm[3 * (t + k)] = n[0]; nrm[3 * (t + k) + 1] = n[1]; nrm[3 * (t + k) + 2] = n[2];
+                const n = normalize([e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]);
+                fn[3 * t] = n[0]; fn[3 * t + 1] = n[1]; fn[3 * t + 2] = n[2];
+            }
+
+            // Triangles touching each OBJ vertex, so corners without file normals can be smoothed.
+            // Only neighbours within ~60° of the corner's own face are averaged, so hard edges stay sharp.
+            const vi = obj.vertexIndex;
+            const start = new Int32Array(obj.vertexCount + 1);
+            for (let c = 0; c < corners; c++) start[vi[c] + 1]++;
+            for (let v = 0; v < obj.vertexCount; v++) start[v + 1] += start[v];
+            const fill = start.slice(0, obj.vertexCount), around = new Int32Array(corners);
+            for (let c = 0; c < corners; c++) around[fill[vi[c]]++] = (c / 3) | 0;
+            const CREASE = Math.cos((60 * Math.PI) / 180);
+
+            for (let c = 0; c < corners; c++) {
+                const t = (c / 3) | 0;
+                let n;
+                if (obj.hasNormals && Number.isFinite(obj.normals[3 * c])) {
+                    n = normalize(map(obj.normals[3 * c], obj.normals[3 * c + 1], obj.normals[3 * c + 2]));
+                } else {
+                    let sx = 0, sy = 0, sz = 0;
+                    for (let k = start[vi[c]]; k < start[vi[c] + 1]; k++) {
+                        const u = around[k];
+                        const d = fn[3 * u] * fn[3 * t] + fn[3 * u + 1] * fn[3 * t + 1] + fn[3 * u + 2] * fn[3 * t + 2];
+                        if (Math.abs(d) >= CREASE) {
+                            const sg = d < 0 ? -1 : 1;   // neighbour wound the other way: flip it before averaging
+                            sx += sg * fn[3 * u]; sy += sg * fn[3 * u + 1]; sz += sg * fn[3 * u + 2];
+                        }
+                    }
+                    n = normalize([sx, sy, sz]);
                 }
+                nrm[3 * c] = n[0]; nrm[3 * c + 1] = n[1]; nrm[3 * c + 2] = n[2];
             }
             return { pos, nrm };
         }
@@ -561,22 +594,167 @@
             return col;
         }
 
+        // ------------------------------------------------------------------ steel shader
+        //
+        // Same attributes/uniforms/projection as Space.js's shader, plus a third attribute `nrm` (per-vertex
+        // normal) in its own buffer. Space.reDraw() only re-uploads pos/col; the normal buffer stays bound to
+        // its attribute slot, so drawArrays picks it up automatically.
+        //
+        // The look: a metal has no diffuse colour, only reflection. Each pixel reflects a procedural studio
+        // environment (bright horizon line, overhead softbox strips, dark floor), weighted by Schlick Fresnel
+        // with a steel F0, plus sharp Blinn-Phong highlights from two lights.
+
+        const STEEL_VERT = `
+        attribute vec4 pos;
+        attribute vec4 col;
+        attribute vec3 nrm;
+        uniform vec3 cPoint;
+        uniform vec3 xAxis;
+        uniform vec3 yAxis;
+        uniform vec3 zAxis;
+        uniform vec3 veriables;
+        varying vec4 vcol;
+        varying vec3 vNormal;
+        varying vec3 vWorld;
+
+        void main() {
+            vcol = col;
+            vNormal = nrm;
+            vWorld = pos.xyz;
+            vec3 d = pos.xyz - cPoint;
+            float xProj = dot(d, xAxis), yProj = dot(d, yAxis), zProj = dot(d, zAxis);
+            float maxWidth = abs(zProj * 0.1 / veriables.y);      // identical to Space.js's projection
+            gl_Position = vec4(xProj / (maxWidth * 16.0), yProj / (maxWidth * 8.0), zProj / 800.0 - veriables.x, 1.0);
+        }`;
+
+        const STEEL_FRAG = `
+        #ifdef GL_FRAGMENT_PRECISION_HIGH
+        precision highp float;
+        #else
+        precision mediump float;
+        #endif
+        uniform vec3 cPoint;
+        uniform float tint;           // 0 = plain steel, 1 = metal coloured by the file colours
+        varying vec4 vcol;
+        varying vec3 vNormal;
+        varying vec3 vWorld;
+
+        // procedural studio surroundings, Z is up
+        vec3 environment(vec3 r) {
+            float t = r.z;
+            vec3 sky = mix(vec3(0.78, 0.8, 0.84), vec3(0.36, 0.39, 0.44), smoothstep(0.0, 0.9, t));
+            vec3 floor_ = mix(vec3(0.42, 0.41, 0.4), vec3(0.13, 0.13, 0.14), smoothstep(0.0, -0.8, t));
+            vec3 c = t > 0.0 ? sky : floor_;
+            c += vec3(1.0) * exp(-t * t * 60.0);                                   // bright horizon band
+            float az = atan(r.y, r.x);
+            c += vec3(2.2) * smoothstep(0.93, 0.985, sin(az * 3.0 + 0.4)) * smoothstep(0.25, 0.5, t);   // softboxes
+            c += vec3(1.4) * smoothstep(0.9, 0.97, r.z);                           // key light overhead
+            return c;
+        }
+
+        void main() {
+            vec3 N = normalize(vNormal);
+            vec3 V = normalize(cPoint - vWorld);
+            if (dot(N, V) < 0.0) N = -N;                 // two-sided: OBJ winding is unreliable
+            vec3 R = reflect(-V, N);
+
+            vec3 F0 = mix(vec3(0.63, 0.64, 0.66), vcol.rgb, tint);
+            float cosT = clamp(dot(N, V), 0.0, 1.0);
+            vec3 F = F0 + (1.0 - F0) * pow(1.0 - cosT, 5.0);   // Schlick Fresnel
+
+            // steel isn't a perfect mirror: blend in a blurry reflection (environment seen along the normal)
+            vec3 c = mix(environment(R), environment(N) * 0.75, 0.25) * F;
+
+            vec3 L1 = normalize(vec3(-0.45, 0.35, 0.82));
+            vec3 L2 = normalize(vec3(0.6, -0.5, 0.35));
+            float s1 = pow(max(dot(N, normalize(L1 + V)), 0.0), 220.0);
+            float s2 = pow(max(dot(N, normalize(L2 + V)), 0.0), 90.0);
+            c += (1.6 * s1 + 0.6 * s2) * mix(vec3(1.0), F0, 0.3);
+
+            c = c / (1.0 + 0.3 * c);                     // soft tone map keeps highlights from clipping flat
+            gl_FragColor = vec4(pow(c, vec3(0.9)), 1.0);
+        }`;
+
+        const normBuffer = gl.createBuffer();
+        const NRM_SLOT = Math.max(space.posId, space.colId) + 1;
+
+        function compileProgram(vsSrc, fsSrc) {
+            const make = (type, src) => {
+                const s = gl.createShader(type);
+                gl.shaderSource(s, src);
+                gl.compileShader(s);
+                if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+                return s;
+            };
+            const p = gl.createProgram();
+            gl.attachShader(p, make(gl.VERTEX_SHADER, vsSrc));
+            gl.attachShader(p, make(gl.FRAGMENT_SHADER, fsSrc));
+            gl.bindAttribLocation(p, space.posId, "pos");     // same slots Space wired its buffers to
+            gl.bindAttribLocation(p, space.colId, "col");
+            gl.bindAttribLocation(p, NRM_SLOT, "nrm");
+            gl.linkProgram(p);
+            if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+            return p;
+        }
+
+        // the uniform locations Space.reDraw() uses, for a given program
+        const locationsFor = (p) => ({
+            program: p,
+            cPointLoc: gl.getUniformLocation(p, "cPoint"),
+            vPointLoc: gl.getUniformLocation(p, "vPoint"),
+            xAxisLoc: gl.getUniformLocation(p, "xAxis"),
+            yAxisLoc: gl.getUniformLocation(p, "yAxis"),
+            zAxisLoc: gl.getUniformLocation(p, "zAxis"),
+            varsLocation: gl.getUniformLocation(p, "veriables"),
+        });
+
+        const libraryShader = locationsFor(space.program);
+        let steelShader = null;
+        try {
+            const p = compileProgram(STEEL_VERT, STEEL_FRAG);
+            steelShader = { ...locationsFor(p), tint: gl.getUniformLocation(p, "tint") };
+        } catch (err) {
+            console.error("steel shader failed:", err);
+            materialEl.querySelectorAll("option:not([value=file])").forEach((o) => (o.disabled = true));
+        }
+
+        function uploadNormals(nrm) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, normBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, nrm, gl.STATIC_DRAW);
+            gl.enableVertexAttribArray(NRM_SLOT);
+            gl.vertexAttribPointer(NRM_SLOT, 3, gl.FLOAT, false, 0, 0);
+        }
+        uploadNormals(new Float32Array(3));
+
+        const isMetal = () => materialEl.value !== "file" && steelShader;
+
+        function applyMaterial() {
+            const s = isMetal() ? steelShader : libraryShader;
+            Object.assign(space, s);            // point Space at this program's uniform locations
+            gl.useProgram(s.program);
+            gl.uniform3fv(s.varsLocation, new Float32Array([space.zShifter, space.magnifier, 0]));
+            if (s === steelShader) gl.uniform1f(steelShader.tint, materialEl.value === "tinted" ? 0.85 : 0);
+            lightingEl.disabled = !!isMetal();  // the metal shader does its own lighting per pixel
+            if (model) {
+                // metal wants the raw file colours (for tinting); the library shader wants baked lighting
+                space.colArr = bakeColors(model.base, model.nrm, !isMetal() && lightingEl.checked);
+            }
+            requestDraw();
+        }
+
         function applyModel() {
             if (!model) return;
             const geo = buildGeometry(model.obj, upAxisEl.value);
             model.nrm = geo.nrm;
             space.posArr = geo.pos;
-            space.colArr = bakeColors(model.base, geo.nrm, lightingEl.checked);
             space.totalVert = geo.pos.length / 4;
-            requestDraw();
+            uploadNormals(geo.nrm);
+            applyMaterial();
         }
 
         upAxisEl.addEventListener("change", () => { applyModel(); resetView(); });
-        lightingEl.addEventListener("change", () => {
-            if (!model) return;
-            space.colArr = bakeColors(model.base, model.nrm, lightingEl.checked);
-            requestDraw();
-        });
+        lightingEl.addEventListener("change", applyMaterial);
+        materialEl.addEventListener("change", applyMaterial);
 
         // ------------------------------------------------------------------ loading files
 
