@@ -1,0 +1,1059 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grass Wallpaper</title>
+    <!--
+        Live desktop wallpaper: a windy meadow.
+        - The wind has a life of its own: calm spells, rising breezes and strong gusty storms, slowly shifting direction.
+        - The bunny hops over to wherever the mouse cursor points on the meadow and jumps there.
+          When the mouse is left alone for a while, it wanders around by itself.
+        Self-contained (no other files needed). Optional URL parameter: ?blades=40000
+    -->
+    <style>
+        html, body {
+            margin: 0;
+            height: 100%;
+            background: #9ec7ea;
+            overflow: hidden;
+            cursor: default;
+            user-select: none;
+        }
+
+        #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+    </style>
+</head>
+
+<body>
+    <canvas id="view"></canvas>
+
+    <script>
+        "use strict";
+
+        const SKY = [0.62, 0.78, 0.92];
+        const FIELD = 84;          // grass may grow in [-FIELD, FIELD]; only blades the camera can see are kept
+        const GROUND = 84;         // detailed terrain
+        const GROUND_RES = 168;
+        const OUTER_STEP = 6;      // coarse terrain further out, mostly inside the fog
+        const OUTER_CELLS = 24;    // cells per side from the centre → reaches ±144
+        const WANDER = 26;         // bunny and butterfly stay within this radius of the view centre
+        const SEGMENTS = 3;        // each blade is 3 bendable segments + a tip
+        const BLADE_CORNERS = 15;  // 5 triangles per blade
+        const FLOWER_CORNERS = 12; // 4 triangles: two crossed diamonds
+        const FLOWER_RATE = 0.015;
+        const BLADE_COUNT = Math.max(2000, Math.min(60000, +new URLSearchParams(location.search).get("blades") || 40000));
+
+        const canvas = document.getElementById("view");
+        /** @type {WebGLRenderingContext} */
+        const gl = canvas.getContext("webgl", { alpha: false, antialias: true });
+        if (!gl) throw new Error("WebGL not available");
+        gl.enable(gl.DEPTH_TEST);
+        gl.clearColor(SKY[0], SKY[1], SKY[2], 1);
+
+        function sizeCanvas() {
+            const dpr = Math.min(2, window.devicePixelRatio || 1);
+            canvas.width = Math.round(window.innerWidth * dpr);
+            canvas.height = Math.round(window.innerHeight * dpr);
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+        sizeCanvas();
+        let resizeTimer = 0;
+        window.addEventListener("resize", () => {
+            sizeCanvas();
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => buildScene(BLADE_COUNT), 300);
+        });
+
+        // ------------------------------------------------------------------ camera
+        //
+        // Orbit camera around a target point (Z is up). xUnitVec = screen right, yUnitVec = screen up,
+        // zUnitVec = view direction; the projection divides by the distance along zUnitVec.
+        // The camera stands well back with a longer lens, so blades read as a soft carpet rather than
+        // individual faceted strips.
+
+        const CAM_ALPHA = 1.45;
+        const space = {
+            X0: 16 * Math.cos(CAM_ALPHA), Y0: 16 * Math.sin(CAM_ALPHA), Z0: 0,
+            alpha: CAM_ALPHA, beta: 0.47, Rc: 95,
+            magnifier: 2.4,
+            Xc: 0, Yc: 0, Zc: 0,
+            xUnitVec: [1, 0, 0], yUnitVec: [0, 0, 1], zUnitVec: [0, 1, 0],
+        };
+
+        function syncCamera() {
+            const a = space.alpha, b = space.beta, r = space.Rc;
+            space.Xc = space.X0 + Math.cos(b) * Math.cos(a) * r;
+            space.Yc = space.Y0 + Math.cos(b) * Math.sin(a) * r;
+            space.Zc = space.Z0 + Math.sin(b) * r;
+            const f = normalize([space.X0 - space.Xc, space.Y0 - space.Yc, space.Z0 - space.Zc]);
+            const up = normalize([-f[2] * f[0], -f[2] * f[1], 1 - f[2] * f[2]]);   // world up, made perpendicular to f
+            space.zUnitVec = f;
+            space.yUnitVec = up;
+            space.xUnitVec = [f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2], f[0] * up[1] - f[1] * up[0]];
+        }
+        syncCamera();
+
+        // Everything past FOG_END is fully fogged (the same colour as the sky), so it is never built at all.
+        const FOG_START = space.Rc + 6;
+        const FOG_END = space.Rc + 50;
+
+        // world point → [depth, screen x, screen y] in -1..1 (same maths as the vertex shader)
+        function project(x, y, z) {
+            const dx = x - space.Xc, dy = y - space.Yc, dz = z - space.Zc;
+            const X = space.xUnitVec, Y = space.yUnitVec, Z = space.zUnitVec;
+            const zp = dx * Z[0] + dy * Z[1] + dz * Z[2];
+            const k = space.magnifier / (1.6 * Math.max(zp, 0.01));
+            return [zp, (dx * X[0] + dy * X[1] + dz * X[2]) * k, (dx * Y[0] + dy * Y[1] + dz * Y[2]) * k * (canvas.width / canvas.height)];
+        }
+        function onScreen(x, y, z, margin) {
+            const [zp, sx, sy] = project(x, y, z);
+            return zp > 0.5 && zp < FOG_END && Math.abs(sx) < 1 + margin && sy > -1 - margin && sy < 1 + margin;
+        }
+
+        // ------------------------------------------------------------------ helpers
+
+        function mulberry32(seed) {
+            return () => {
+                seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+                let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+                t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+                return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+            };
+        }
+
+        // rolling hills, Z is up
+        function hills(x, y) {
+            return 2.6 * Math.sin(x * 0.075 + 0.4) * Math.cos(y * 0.065 - 0.3)
+                + 1.1 * Math.sin(x * 0.16 + y * 0.12)
+                + 0.5 * Math.cos(x * 0.31 - y * 0.27);
+        }
+
+        // Pond: the hills are flattened around a point, then a bowl is dug below the water line.
+        // The rim wobbles with angle so the shoreline looks natural rather than a perfect circle.
+        const POND = { x: -19, y: 10, r: 7.5, depth: 2.4 };
+        const POND_BASE = hills(POND.x, POND.y);
+        const WATER_LEVEL = POND_BASE - 0.4;
+        const smoothstep = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+        const pondRadius = (a) => POND.r * (1 + 0.14 * Math.sin(3 * a + 1) + 0.07 * Math.sin(5 * a - 0.5));
+
+        function height(x, y) {
+            const dx = x - POND.x, dy = y - POND.y, d = Math.hypot(dx, dy);
+            const R = pondRadius(Math.atan2(dy, dx));
+            const flat = smoothstep(R, R + 6, d);                 // 0 at the pond, 1 well away from it
+            let z = POND_BASE + (hills(x, y) - POND_BASE) * flat;
+            if (d < R) z -= POND.depth * (1 - (d / R) * (d / R));
+            return z;
+        }
+        const nearPond = (x, y) => Math.hypot(x - POND.x, y - POND.y) < POND.r * 1.4;
+        const isWater = (x, y) => nearPond(x, y) && height(x, y) < WATER_LEVEL + 0.08;
+
+        // lushness varies in patches: taller, greener grass in some areas
+        function lush(x, y) {
+            return 0.5 + 0.5 * Math.sin(x * 0.11 + 1.3) * Math.sin(y * 0.09 - 0.7);
+        }
+
+        const LIGHT = normalize([-0.4, 0.3, 0.87]);
+        function normalize(v) {
+            const m = Math.hypot(v[0], v[1], v[2]) || 1;
+            return [v[0] / m, v[1] / m, v[2] / m];
+        }
+
+        // ------------------------------------------------------------------ scene data
+
+        let pos, col;               // per-frame geometry (grass, flowers, animals, water)
+        let totalVert = 0;
+        let groundVert = 0;         // terrain never moves: built once into its own buffers
+        let blades = null, flowers = null;
+        let tipX, tipY, tipZ;       // per-blade tip position, reused by flowers
+
+        const OUTER_IN = GROUND / OUTER_STEP;
+        const outerCellSkipped = (i, j) => i > -OUTER_IN && i < OUTER_IN - 1 && j > -OUTER_IN && j < OUTER_IN - 1;   // overlaps the detailed grid by one ring
+
+        function buildScene(count) {
+            const rand = mulberry32(1337);
+
+            blades = {
+                n: count,
+                x: new Float32Array(count), y: new Float32Array(count), z: new Float32Array(count),
+                fx: new Float32Array(count), fy: new Float32Array(count),     // facing (horizontal)
+                len: new Float32Array(count), wid: new Float32Array(count),
+                lean: new Float32Array(count), stiff: new Float32Array(count), phase: new Float32Array(count),
+                r: new Float32Array(count), g: new Float32Array(count), b: new Float32Array(count),
+                reed: new Uint8Array(count),
+            };
+            for (let i = 0; i < count; i++) {
+                // no grass in the water, and none where the camera can't see it (off screen or lost in the fog)
+                let x, y, tries = 0;
+                do { x = (rand() * 2 - 1) * FIELD; y = (rand() * 2 - 1) * FIELD; }
+                while (((nearPond(x, y) && height(x, y) < WATER_LEVEL + 0.12) || !onScreen(x, y, height(x, y), 0.08)) && ++tries < 200);
+                const l = lush(x, y);
+                const yaw = rand() * Math.PI * 2;
+                blades.x[i] = x; blades.y[i] = y; blades.z[i] = height(x, y) - 0.05;
+                blades.fx[i] = Math.cos(yaw); blades.fy[i] = Math.sin(yaw);
+                // shorter towards the edge of the field, so the meadow fades out instead of stopping at a hard line
+                const edgeFade = 0.3 + 0.7 * smoothstep(FIELD, FIELD - 7, Math.max(Math.abs(x), Math.abs(y)));
+                blades.len[i] = (1.3 + rand() * 1.4) * (0.7 + 0.6 * l) * edgeFade;
+                blades.wid[i] = 0.16 + rand() * 0.14;
+                blades.lean[i] = 0.1 + rand() * 0.35;
+                blades.stiff[i] = 0.75 + rand() * 0.5;
+                blades.phase[i] = rand() * Math.PI * 2;
+                // greens with some dry, yellowish blades mixed in
+                const dry = rand() < 0.12 ? 0.5 + rand() * 0.5 : rand() * 0.25;
+                const shade = 0.85 + rand() * 0.3;
+                blades.r[i] = (0.2 + 0.45 * dry) * shade;
+                blades.g[i] = (0.5 + 0.12 * l + 0.05 * dry) * shade;
+                blades.b[i] = (0.1 + 0.05 * l) * shade;
+
+                // along the shore: tall, stiff, darker reeds
+                if (nearPond(x, y) && height(x, y) < WATER_LEVEL + 0.7) {
+                    blades.reed[i] = 1;
+                    blades.len[i] = 3.2 + rand() * 1.8;
+                    blades.wid[i] = 0.14 + rand() * 0.06;
+                    blades.stiff[i] = 1.6 + rand() * 0.6;
+                    blades.lean[i] = 0.05 + rand() * 0.12;
+                    blades.r[i] = 0.2 * shade; blades.g[i] = 0.42 * shade; blades.b[i] = 0.14 * shade;
+                }
+            }
+            tipX = new Float32Array(count); tipY = new Float32Array(count); tipZ = new Float32Array(count);
+
+            const FLOWER_COLORS = [[1, 1, 0.95], [1, 0.86, 0.2], [0.72, 0.5, 1], [1, 0.55, 0.75]];
+            flowers = [];
+            for (let i = 0; i < count; i++) {
+                if (blades.reed[i]) {
+                    // brown cattail heads on some reeds
+                    if (rand() < 0.3) flowers.push({ blade: i, color: [0.36, 0.22, 0.1], size: 0.3 });
+                } else if (rand() < FLOWER_RATE) {
+                    blades.len[i] *= 1.25;
+                    flowers.push({ blade: i, color: FLOWER_COLORS[(rand() * FLOWER_COLORS.length) | 0], size: 0.2 + rand() * 0.12 });
+                }
+            }
+
+            totalVert = count * BLADE_CORNERS + flowers.length * FLOWER_CORNERS + CHAR_CORNERS + BUTTERFLY_CORNERS + POND_CORNERS;
+            pos = new Float32Array(totalVert * 4);
+            col = new Float32Array(totalVert * 4);
+            writeGround();
+        }
+
+        // terrain never moves, so it is written once into static buffers; cells the camera can't see are skipped
+        const groundPosBuffer = gl.createBuffer(), groundColBuffer = gl.createBuffer();
+        function writeGround() {
+            const P = [], Cl = [];
+            const put = (x, y, zOff, far) => {
+                const z = height(x, y) + zOff;
+                const e = 0.05;
+                const n = normalize([height(x - e, y) - height(x + e, y), height(x, y - e) - height(x, y + e), 2 * e]);
+                const l = lush(x, y);
+                const light = 0.45 + 0.6 * Math.max(0, n[0] * LIGHT[0] + n[1] * LIGHT[1] + n[2] * LIGHT[2]);
+                let c;
+                if (far) {
+                    c = [0.21 + 0.06 * (1 - l), 0.37 + 0.06 * l, 0.1];
+                } else {
+                    c = [0.2 + 0.08 * (1 - l), 0.33 + 0.1 * l, 0.1];
+                    // sandy bank near the waterline, dark mud underwater
+                    const bank = smoothstep(WATER_LEVEL + 0.9, WATER_LEVEL + 0.1, z);
+                    c = c.map((v, k) => v + ([0.52, 0.44, 0.3][k] - v) * bank);
+                    const under = smoothstep(WATER_LEVEL, WATER_LEVEL - 0.4, z);
+                    c = c.map((v, k) => v + ([0.24, 0.21, 0.14][k] - v) * under);
+                }
+                P.push(x, y, z, 1);
+                Cl.push(c[0] * light, c[1] * light, c[2] * light, 1);
+            };
+            const cell = (x0, y0, x1, y1, zOff, far, margin) => {
+                const xm = (x0 + x1) / 2, ym = (y0 + y1) / 2;
+                if (!(onScreen(x0, y0, height(x0, y0), margin) || onScreen(x1, y0, height(x1, y0), margin) ||
+                      onScreen(x1, y1, height(x1, y1), margin) || onScreen(x0, y1, height(x0, y1), margin) ||
+                      onScreen(xm, ym, height(xm, ym), margin))) return;
+                put(x0, y0, zOff, far); put(x1, y0, zOff, far); put(x1, y1, zOff, far);
+                put(x0, y0, zOff, far); put(x1, y1, zOff, far); put(x0, y1, zOff, far);
+            };
+            const step = (2 * GROUND) / GROUND_RES;
+            for (let i = 0; i < GROUND_RES; i++) {
+                for (let j = 0; j < GROUND_RES; j++) {
+                    const x0 = -GROUND + i * step, y0 = -GROUND + j * step;
+                    cell(x0, y0, x0 + step, y0 + step, 0, false, 0.15);
+                }
+            }
+            // coarse outer ring sits slightly lower so the detailed terrain wins where they overlap
+            for (let i = -OUTER_CELLS; i < OUTER_CELLS; i++) {
+                for (let j = -OUTER_CELLS; j < OUTER_CELLS; j++) {
+                    if (outerCellSkipped(i, j)) continue;
+                    const x0 = i * OUTER_STEP, y0 = j * OUTER_STEP;
+                    cell(x0, y0, x0 + OUTER_STEP, y0 + OUTER_STEP, -0.2, true, 0.6);
+                }
+            }
+            groundVert = P.length / 4;
+            gl.bindBuffer(gl.ARRAY_BUFFER, groundPosBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(P), gl.STATIC_DRAW);
+            gl.bindBuffer(gl.ARRAY_BUFFER, groundColBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(Cl), gl.STATIC_DRAW);
+        }
+
+        // ------------------------------------------------------------------ wind
+        //
+        // The wind runs on its own, built from smooth random noise at a few time scales:
+        //   weather (~6 s)   decides whether it's a lighter spell or a stormy one (mostly stormy),
+        //   gusts   (~1.8 s) make it swing hard between weaker and stronger within that,
+        //   bursts  (~1 s)   add sudden sharp gusts, strongest when it's already stormy.
+        // It never drops below a light breeze (MIN_WIND), and lighter spells only last a few seconds.
+        // The direction is its own fluctuating variable: it keeps turning, with a turning speed that itself
+        // wanders randomly, so over time the wind comes from every side. Everything is eased so nothing snaps.
+
+        const MIN_WIND = 0.3;
+        const STORM_GAIN = 2.0;
+        const MAX_WIND = 2.8;         // cap, so even the strongest storm doesn't lay every blade flat
+        const MAX_TURN = 0.3;         // fastest the wind direction swings (radians per second)
+
+        // smooth 1D value noise in 0..1
+        function noise1(t, seed) {
+            const i = Math.floor(t), f = t - i, u = f * f * (3 - 2 * f);
+            const h = (n) => { const v = Math.sin((n + seed * 57.31) * 127.1) * 43758.5453; return v - Math.floor(v); };
+            return h(i) * (1 - u) + h(i + 1) * u;
+        }
+
+        const WIND_SEED = Math.random() * 100;
+        // ang: current direction; ox/oy: how far the gust pattern has been carried downwind
+        const wind = { dx: 1, dy: 0, ang: Math.random() * Math.PI * 2, strength: 0.6, clock: 0, flutter: 0, ox: 0, oy: 0 };
+
+        function updateWind(dt, time) {
+            const weather = noise1(time / 6, WIND_SEED);
+            const gusts = noise1(time / 1.8, WIND_SEED + 1);
+            const burst = noise1(time / 1.1, WIND_SEED + 2);
+            const storm = smoothstep(0.1, 0.65, weather);                        // 0 light … 1 stormy
+            const target = Math.min(MAX_WIND, MIN_WIND
+                + STORM_GAIN * Math.pow(storm, 1.3) * (0.25 + 0.75 * gusts)     // gusts swing the wind hard
+                + 0.3 * gusts
+                + 1.0 * (0.3 + 0.7 * storm) * Math.pow(burst, 3));              // sudden sharp bursts, even in lighter spells
+            // picks up faster than it dies down, like real gusts
+            const rate = target > wind.strength ? 3 : 1.4;
+            wind.strength += (target - wind.strength) * (1 - Math.exp(-dt * rate));
+
+            // direction: turning speed wanders between -MAX_TURN and +MAX_TURN, plus a small slower wobble
+            wind.ang += dt * MAX_TURN * (noise1(time / 11, WIND_SEED + 3) - 0.5) * 2;
+            const ang = wind.ang + 0.2 * (noise1(time / 6, WIND_SEED + 4) - 0.5) * 2;
+            wind.dx = Math.cos(ang); wind.dy = Math.sin(ang);
+
+            // the gust pattern is carried downwind (so it drifts with the wind instead of spinning when it turns)
+            const carry = 2.5 + 5 * wind.strength;
+            wind.ox += wind.dx * carry * dt; wind.oy += wind.dy * carry * dt;
+            wind.clock += dt;
+            // flutter phase is accumulated (not time * rate), so changing its speed never makes it jump
+            wind.flutter += dt * (3.5 + 1.5 * wind.strength);
+        }
+
+        // ------------------------------------------------------------------ mouse (for the bunny)
+
+        const mouse = { x: 0, y: 0, seen: false, lastMove: -1e9 };
+        const onMove = (e) => {
+            mouse.x = e.clientX; mouse.y = e.clientY; mouse.seen = true;
+            mouse.lastMove = performance.now() / 1000;
+        };
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("mousemove", onMove);
+
+        // cursor → point on the meadow, or null when it points at the sky / into the fog
+        function groundUnderCursor() {
+            const aspect = canvas.width / canvas.height;
+            const nx = (mouse.x / window.innerWidth) * 2 - 1, ny = 1 - (mouse.y / window.innerHeight) * 2;
+            const a = (nx * 1.6) / space.magnifier, b = (ny * 1.6) / (space.magnifier * aspect);
+            const X = space.xUnitVec, Y = space.yUnitVec, Z = space.zUnitVec;
+            const d = [Z[0] + a * X[0] + b * Y[0], Z[1] + a * X[1] + b * Y[1], Z[2] + a * X[2] + b * Y[2]];
+            const at = (t) => [space.Xc + d[0] * t, space.Yc + d[1] * t, space.Zc + d[2] * t];
+            const below = (q) => q[2] < height(q[0], q[1]);
+            let prev = 0;
+            for (let t = 2; t < FOG_START + 10; t += 1) {       // t is depth along the view, so this stops at the fog
+                if (below(at(t))) {
+                    let lo = prev, hi = t;
+                    for (let k = 0; k < 8; k++) { const m = (lo + hi) / 2; if (below(at(m))) hi = m; else lo = m; }
+                    return at(hi);
+                }
+                prev = t;
+            }
+            return null;
+        }
+
+        // ------------------------------------------------------------------ per-frame blade update
+
+        // Gusts are patches of stronger wind: three wave trains at fixed orientations 60° apart (with wobbly
+        // fronts) add up to irregular blobs. (x, y) is already shifted by how far the wind has carried the
+        // pattern, so the patches sweep across the field downwind, whichever way it blows. They also slowly
+        // change shape over time t. Returns 0..1.
+        function gustAt(x, y, t) {
+            const a = Math.sin(0.11 * x + 1.3 * Math.sin(0.05 * y + t * 0.2));
+            const b = Math.sin(0.09 * (0.5 * x + 0.866 * y) + 1.1 * Math.sin(0.04 * x - t * 0.15));
+            const c = Math.sin(0.07 * (-0.5 * x + 0.866 * y) + t * 0.3);
+            const g = 0.5 + 0.5 * (a + b + c) / 3;
+            return g * g * (3 - 2 * g);
+        }
+
+        function writeBlades(t, time) {
+            const strength = wind.strength;
+            const dx = wind.dx, dy = wind.dy, ox = wind.ox, oy = wind.oy;
+            const B = blades;
+            let o = 0;
+
+            // reusable per-blade scratch: centre line points and half-widths
+            const px = [0, 0, 0, 0], py = [0, 0, 0, 0], pz = [0, 0, 0, 0];
+            const halfW = [0.5, 0.36, 0.2];
+
+            // the bunny pushes grass aside around its feet (less when it is in the air)
+            const cx = C.x, cy = C.y;
+            const push = PUSH_STRENGTH * Math.max(0, 1 - (C.z + C.hop) / 1.2);
+
+            for (let i = 0; i < B.n; i++) {
+                const x = B.x[i], y = B.y[i];
+                const g = gustAt(x - ox, y - oy, t);
+
+                // how far this blade bends right now: steady push + gust + a flutter that gets livelier in strong wind
+                const flutter = 0.05 * Math.sin(wind.flutter + B.phase[i]) * (0.3 + g);
+                const windBend = (strength * (0.15 + 0.85 * g) + flutter * (0.4 + strength)) / B.stiff[i];
+
+                // bend is a horizontal vector along the wind axis, plus a radial shove away from the bunny
+                let bx = dx * windBend, by = dy * windBend;
+                const ex = x - cx, ey = y - cy, d2 = ex * ex + ey * ey;
+                if (push > 0 && d2 < PUSH_RADIUS * PUSH_RADIUS) {
+                    const d = Math.sqrt(d2) + 1e-4;
+                    const p = push * (1 - d / PUSH_RADIUS);
+                    bx += (ex / d) * p; by += (ey / d) * p;
+                }
+                const bend = Math.hypot(bx, by);
+                const ux = bend > 1e-6 ? bx / bend : dx, uy = bend > 1e-6 ? by / bend : dy;
+
+                // walk up the blade; each segment tilts a bit further downwind (keeps the blade's length)
+                const segLen = B.len[i] / SEGMENTS;
+                const fx = B.fx[i], fy = B.fy[i], lean = B.lean[i];
+                px[0] = x; py[0] = y; pz[0] = B.z[i];
+                for (let k = 1; k <= SEGMENTS; k++) {
+                    const h = k / SEGMENTS;
+                    const a = Math.min(1.45, bend * 1.25 * Math.pow(h, 1.4));
+                    const sa = Math.sin(a), ca = Math.cos(a);
+                    const l = lean * h;
+                    px[k] = px[k - 1] + segLen * (sa * ux + l * fx * ca);
+                    py[k] = py[k - 1] + segLen * (sa * uy + l * fy * ca);
+                    pz[k] = pz[k - 1] + segLen * ca;
+                }
+                tipX[i] = px[SEGMENTS]; tipY[i] = py[SEGMENTS]; tipZ[i] = pz[SEGMENTS];
+
+                // blade width runs across its facing direction
+                const wx = -fy * B.wid[i], wy = fx * B.wid[i];
+
+                // colors: dark at the root, bright at the tip; bent blades catch more light (the silvery wave)
+                const hi = Math.min(1, bend * 0.45);
+                const r = B.r[i], gg = B.g[i], b = B.b[i];
+
+                const vert = (k, side) => {
+                    const hw = k < SEGMENTS ? halfW[k] * side : 0;
+                    pos[o] = px[k] + wx * hw; pos[o + 1] = py[k] + wy * hw; pos[o + 2] = pz[k]; pos[o + 3] = 1;
+                    const h = k / SEGMENTS;
+                    const shade = 0.42 + 0.7 * h;
+                    const lift = hi * h * 0.55;
+                    col[o] = Math.min(1, r * shade + lift * 0.55);
+                    col[o + 1] = Math.min(1, gg * shade + lift * 0.5);
+                    col[o + 2] = Math.min(1, b * shade + lift * 0.22);
+                    col[o + 3] = 1;
+                    o += 4;
+                };
+                // two quads up the blade, then the tip triangle
+                vert(0, -1); vert(0, 1); vert(1, 1);
+                vert(0, -1); vert(1, 1); vert(1, -1);
+                vert(1, -1); vert(1, 1); vert(2, 1);
+                vert(1, -1); vert(2, 1); vert(2, -1);
+                vert(2, -1); vert(2, 1); vert(3, 0);
+            }
+
+            // flowers ride on their blade's tip, so they sway with it
+            for (const f of flowers) {
+                const cx = tipX[f.blade], cy = tipY[f.blade], cz = tipZ[f.blade];
+                const s = f.size, [r, g, b] = f.color;
+                const quad = (ax, ay) => {
+                    const pts = [
+                        [cx - ax * s, cy - ay * s, cz], [cx, cy, cz - s * 0.7], [cx + ax * s, cy + ay * s, cz],
+                        [cx - ax * s, cy - ay * s, cz], [cx + ax * s, cy + ay * s, cz], [cx, cy, cz + s * 0.7],
+                    ];
+                    for (let k = 0; k < 6; k++) {
+                        const p = pts[k];
+                        pos[o] = p[0]; pos[o + 1] = p[1]; pos[o + 2] = p[2]; pos[o + 3] = 1;
+                        const c = k === 1 ? 0.75 : 1;
+                        col[o] = r * c; col[o + 1] = g * c; col[o + 2] = b * c; col[o + 3] = 1;
+                        o += 4;
+                    }
+                };
+                quad(1, 0);
+                quad(0, 1);
+            }
+            return o;
+        }
+
+        // ------------------------------------------------------------------ bunny
+        //
+        // Built from ellipsoids; every frame each part gets a new position, rotation and size from the animation
+        // state, and all parts go through one shared character transform. On the wallpaper it wanders on its own:
+        // rests for a while, then hops somewhere new, with the odd jump.
+
+        const CHAR_SCALE = 0.95;
+        const WALK_SPEED = 3.2;
+        const RUN_SPEED = 4.6;          // when the cursor is far away
+        const FOLLOW_TIMEOUT = 10;      // seconds without mouse movement before the bunny goes back to wandering
+        const JUMP_SPEED = 10;
+        const GRAVITY = 30;
+        const PUSH_RADIUS = 2.4;
+        const PUSH_STRENGTH = 2.2;
+
+        const COL = {
+            fur: [1.0, 0.74, 0.5],
+            belly: [1.0, 0.93, 0.8],
+            feet: [0.94, 0.6, 0.4],
+            innerEar: [1.0, 0.6, 0.66],
+            eye: [0.07, 0.05, 0.08],
+            shine: [1, 1, 1],
+            cheek: [1.0, 0.56, 0.62],
+            nose: [0.86, 0.34, 0.44],
+            tail: [1.0, 0.97, 0.94],
+        };
+
+        function makeSphere(nLon, nLat) {
+            const v = [];
+            for (let i = 0; i <= nLat; i++) {
+                const th = (Math.PI * i) / nLat;
+                for (let j = 0; j <= nLon; j++) {
+                    const ph = (2 * Math.PI * j) / nLon;
+                    v.push(Math.sin(th) * Math.cos(ph), Math.sin(th) * Math.sin(ph), Math.cos(th));
+                }
+            }
+            const idx = [];
+            for (let i = 0; i < nLat; i++) {
+                for (let j = 0; j < nLon; j++) {
+                    const a = i * (nLon + 1) + j, b = a + nLon + 1;
+                    idx.push(a, b, a + 1, a + 1, b, b + 1);
+                }
+            }
+            return { v: Float32Array.from(v), idx: Uint16Array.from(idx) };
+        }
+        const SPHERE_HI = makeSphere(22, 14);
+        const SPHERE_LO = makeSphere(10, 6);
+
+        // 3×3 rotation matrices, row-major
+        const rotX = (a) => { const c = Math.cos(a), s = Math.sin(a); return [1, 0, 0, 0, c, -s, 0, s, c]; };
+        const rotY = (a) => { const c = Math.cos(a), s = Math.sin(a); return [c, 0, s, 0, 1, 0, -s, 0, c]; };
+        const rotZ = (a) => { const c = Math.cos(a), s = Math.sin(a); return [c, -s, 0, s, c, 0, 0, 0, 1]; };
+        const I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+        function mul(A, B) {
+            const R = new Array(9);
+            for (let r = 0; r < 3; r++)
+                for (let c = 0; c < 3; c++)
+                    R[3 * r + c] = A[3 * r] * B[c] + A[3 * r + 1] * B[3 + c] + A[3 * r + 2] * B[6 + c];
+            return R;
+        }
+        const apply = (M, x, y, z) => [
+            M[0] * x + M[1] * y + M[2] * z,
+            M[3] * x + M[4] * y + M[5] * z,
+            M[6] * x + M[7] * y + M[8] * z,
+        ];
+
+        // animation state
+        const C = {
+            x: space.X0, y: space.Y0, vx: 0, vy: 0, yaw: 0,
+            z: 0, vz: 0, hop: 0,          // jump height / vertical speed / walking hop height
+            phase: 0, walk: 0,            // walk cycle and how much we are walking (0 idle … 1 full speed)
+            ear: 0.15, earV: 0,           // ear angle on a spring, so they flop and lag behind
+            land: 0,                      // landing squash, decays after touching down
+            blinkIn: 2, blink: 1,         // seconds until next blink, eye openness
+        };
+        // wandering brain
+        const AI = { mode: "rest", timer: 3, tx: 0, ty: 0, stuck: 0, jumpIn: 0 };
+
+        // Parts in the bunny's local frame: x forward, y left, z up, origin between the feet.
+        function bunnyParts(time) {
+            const w = C.walk, ph = C.phase;
+            const parts = [];
+            const add = (c, R, r, col, mesh = SPHERE_HI) => parts.push({ c, R, r, col, mesh });
+
+            add([0, 0, 1.25], I3, [1.15, 1.1, 1.2], COL.fur);                      // body/head
+            add([0.5, 0, 1.0], I3, [0.72, 0.78, 0.78], COL.belly);                 // belly patch
+            add([-1.12, Math.sin(time * 7) * 0.08 * (0.4 + w), 0.95], I3, [0.3, 0.3, 0.3], COL.tail, SPHERE_LO);
+            add([1.12, 0, 1.4], I3, [0.06, 0.09, 0.06], COL.nose, SPHERE_LO);
+
+            for (const s of [1, -1]) {                                              // s = +1 left, -1 right
+                const earR = mul(rotY(-C.ear), rotX(-s * (0.28 + 0.08 * Math.sin(time * 1.7 + s))));
+                const pivot = [-0.15, s * 0.42, 2.2];
+                const ec = apply(earR, 0, 0, 0.72), ic = apply(earR, 0.08, 0, 0.72);
+                add([pivot[0] + ec[0], pivot[1] + ec[1], pivot[2] + ec[2]], earR, [0.16, 0.3, 0.8], COL.fur);
+                add([pivot[0] + ic[0], pivot[1] + ic[1], pivot[2] + ic[2]], earR, [0.1, 0.18, 0.6], COL.innerEar);
+
+                add([0.97, s * 0.4, 1.58], I3, [0.12, 0.15, 0.22 * C.blink], COL.eye);
+                const shine = C.blink > 0.5 ? 0.055 : 0.0001;
+                add([1.07, s * 0.35, 1.66], I3, [shine, shine, shine], COL.shine, SPHERE_LO);
+                add([0.84, s * 0.7, 1.32], I3, [0.1, 0.2, 0.13], COL.cheek, SPHERE_LO);
+
+                const armR = mul(rotY(s * Math.sin(ph) * 0.7 * w), rotX(-s * 0.5));
+                const ac = apply(armR, 0, 0, -0.22);
+                add([0.15 + ac[0], s * 1.0 + ac[1], 1.05 + ac[2]], armR, [0.2, 0.16, 0.3], COL.fur, SPHERE_LO);
+
+                const fx = 0.3 + s * 0.42 * Math.sin(ph) * w;
+                const lift = Math.max(0, s * Math.cos(ph)) * 0.28 * w;
+                add([fx, s * 0.48, 0.16 + lift], rotY(-s * Math.cos(ph) * 0.4 * w), [0.45, 0.28, 0.18], COL.feet, SPHERE_LO);
+            }
+            return parts;
+        }
+
+        const CHAR_CORNERS = bunnyParts(0).reduce((n, p) => n + p.mesh.idx.length, 0);
+        C.yaw = space.alpha;   // start facing the camera
+
+        const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+        function pickTarget() {
+            for (let n = 0; n < 30; n++) {
+                const a = Math.random() * Math.PI * 2, r = 3 + Math.random() * (WANDER - 6);
+                const x = space.X0 + Math.cos(a) * r, y = space.Y0 + Math.sin(a) * r;
+                if (!nearPond(x, y) && Math.hypot(x - C.x, y - C.y) > 5) return [x, y];
+            }
+            return [0, 0];
+        }
+
+        function updateBunny(dt, time) {
+            let mx = 0, my = 0, jump = false, maxSpeed = WALK_SPEED;
+            AI.jumpIn -= dt;
+
+            // follow the cursor while the mouse is in use and pointing at the meadow
+            const cursor = mouse.seen && performance.now() / 1000 - mouse.lastMove < FOLLOW_TIMEOUT ? groundUnderCursor() : null;
+            if (cursor) {
+                if (AI.mode !== "follow") { AI.mode = "follow"; AI.stuck = 0; }
+                // cursor moved somewhere new: forget about being blocked
+                if (Math.hypot(cursor[0] - AI.tx, cursor[1] - AI.ty) > 2) { AI.tx = cursor[0]; AI.ty = cursor[1]; AI.stuck = 0; }
+                const ex = cursor[0] - C.x, ey = cursor[1] - C.y, d = Math.hypot(ex, ey);
+                // arrived (or blocked by the pond): stop and jump on the spot
+                if (d < 1.3 || AI.stuck > 0.6) {
+                    if (AI.jumpIn < 0) { jump = true; AI.jumpIn = 0.55 + Math.random() * 0.6; }
+                } else {
+                    mx = ex / d; my = ey / d;
+                    maxSpeed = d > 8 ? RUN_SPEED : WALK_SPEED * Math.max(0.6, Math.min(1, d / 4));
+                    if (d > 6 && Math.random() < dt * 0.12) jump = true;                        // the odd leap on the way
+                }
+            } else if (AI.mode === "follow") {
+                AI.mode = "rest"; AI.timer = 1.5 + Math.random() * 3;
+            } else if (AI.mode === "hop") {
+                const ex = AI.tx - C.x, ey = AI.ty - C.y, d = Math.hypot(ex, ey);
+                if (d < 1.2 || AI.stuck > 1.2) { AI.mode = "rest"; AI.timer = 2.5 + Math.random() * 6; }
+                else { mx = ex / d; my = ey / d; }
+                if (Math.random() < dt * 0.12) jump = true;
+            } else {
+                AI.timer -= dt;
+                if (AI.timer < 0) { [AI.tx, AI.ty] = pickTarget(); AI.mode = "hop"; AI.stuck = 0; }
+                if (Math.random() < dt * 0.05) jump = true;
+            }
+
+            const tx = mx * maxSpeed, ty = my * maxSpeed;
+            const ease = Math.min(1, dt * 10);
+            C.vx += (tx - C.vx) * ease;
+            C.vy += (ty - C.vy) * ease;
+            // bunnies don't swim: each axis only moves if it doesn't step into the pond
+            const nx = C.x + C.vx * dt, ny = C.y + C.vy * dt;
+            if (!isWater(nx, C.y)) C.x = nx; else C.vx = 0;
+            if (!isWater(C.x, ny)) C.y = ny; else C.vy = 0;
+
+            const speed = Math.hypot(C.vx, C.vy);
+            if ((AI.mode === "hop" || AI.mode === "follow") && (mx || my)) AI.stuck = speed < 1 ? AI.stuck + dt : 0;
+            C.walk += (Math.min(1, speed / WALK_SPEED) - C.walk) * Math.min(1, dt * 8);
+            if (speed > 0.3) C.yaw += wrapAngle(Math.atan2(C.vy, C.vx) - C.yaw) * Math.min(1, dt * 10);
+
+            // hop cycle while walking
+            C.phase += dt * 11 * Math.max(C.walk, Math.min(1.6, speed / WALK_SPEED));
+            C.hop = Math.abs(Math.sin(C.phase)) * 0.45 * C.walk;
+
+            const grounded = C.z <= 0;
+            if (jump && grounded) C.vz = JUMP_SPEED;
+            C.vz -= GRAVITY * dt;
+            C.z += C.vz * dt;
+            if (C.z <= 0) {
+                if (C.vz < -4) C.land = Math.min(0.9, -C.vz / 14);
+                C.z = 0; C.vz = 0;
+            }
+            C.land *= Math.exp(-dt * 9);
+
+            // ears: damped spring towards a target that leans back when walking and flips up/down in jumps
+            const earTarget = 0.12 + 0.4 * C.walk + 0.1 * Math.cos(2 * C.phase) * C.walk - 0.035 * C.vz;
+            C.earV += ((earTarget - C.ear) * 70 - C.earV * 7) * dt;
+            C.ear += C.earV * dt;
+
+            C.blinkIn -= dt;
+            if (C.blinkIn < 0) { C.blinkIn = 1.8 + Math.random() * 3.2; C.blinkT = 0.14; }
+            if (C.blinkT > 0) { C.blinkT -= dt; C.blink = 0.08; } else C.blink = 1;
+        }
+
+        function writeBunny(o, time) {
+            const w = C.walk, hopS = Math.abs(Math.sin(C.phase));
+            let sz = 1 + w * (0.1 * hopS - 0.12 * Math.pow(1 - hopS, 4))
+                + 0.03 * Math.sin(time * 2.4) * (1 - w)
+                - 0.3 * C.land
+                + Math.max(-0.12, Math.min(0.15, C.vz * 0.012));
+            const sxy = 1 / Math.sqrt(sz);
+            const S = [sxy * CHAR_SCALE, sxy * CHAR_SCALE, sz * CHAR_SCALE];
+
+            const look = (1 - w) * 0.35 * Math.sin(time * 0.6) * Math.sin(time * 0.23 + 1);
+            const G = mul(rotZ(C.yaw + look), rotY(0.2 * w - 0.02 * C.vz));
+            const base = [C.x, C.y, height(C.x, C.y) - 0.05 + C.z + C.hop];
+            return writeEllipsoids(o, bunnyParts(time), G, S, base);
+        }
+
+        // unit sphere → radii → part rotation → part centre → per-axis scale S → rotation G → world position `base`
+        function writeEllipsoids(o, parts, G, S, base) {
+            for (const p of parts) {
+                const { v, idx } = p.mesh;
+                const [cr, cg, cb] = p.col;
+                for (let k = 0; k < idx.length; k++, o += 4) {
+                    const q = 3 * idx[k];
+                    const ux = v[q], uy = v[q + 1], uz = v[q + 2];
+                    const lp = apply(p.R, ux * p.r[0], uy * p.r[1], uz * p.r[2]);
+                    const wp = apply(G, (p.c[0] + lp[0]) * S[0], (p.c[1] + lp[1]) * S[1], (p.c[2] + lp[2]) * S[2]);
+                    pos[o] = base[0] + wp[0]; pos[o + 1] = base[1] + wp[1]; pos[o + 2] = base[2] + wp[2]; pos[o + 3] = 1;
+                    const ln = apply(p.R, ux / p.r[0], uy / p.r[1], uz / p.r[2]);
+                    const wn = normalize(apply(G, ln[0] / S[0], ln[1] / S[1], ln[2] / S[2]));
+                    const d = 0.5 + 0.5 * (wn[0] * LIGHT[0] + wn[1] * LIGHT[1] + wn[2] * LIGHT[2]);
+                    const shade = 0.36 + 0.78 * d * d;
+                    col[o] = Math.min(1, cr * shade); col[o + 1] = Math.min(1, cg * shade); col[o + 2] = Math.min(1, cb * shade); col[o + 3] = 1;
+                }
+            }
+            return o;
+        }
+
+        // ------------------------------------------------------------------ butterfly
+
+        const BF_SCALE = 1.0;
+        const BF_DARK = [0.1, 0.08, 0.12];
+
+        function makeWing(root, outline, bands) {
+            const RINGS = [0.55, 0.8, 0.9, 0.95, 1.0];
+            const SUB = 3;
+            const edge = [];
+            for (let k = 0; k + 1 < outline.length; k++) {
+                for (let s = 0; s < SUB; s++) {
+                    const f = s / SUB, a = outline[k], b = outline[k + 1];
+                    edge.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
+                }
+            }
+            edge.push(outline[outline.length - 1]);
+
+            const ringPt = (k, j) => {
+                const f = RINGS[j], e = edge[k];
+                return [root[0] + (e[0] - root[0]) * f, root[1] + (e[1] - root[1]) * f];
+            };
+            const ringCol = (k, j) => (j === 3 && k % 3 === 1 ? [0.95, 0.95, 0.9] : bands[j + 1]);
+
+            const corners = [];
+            const put = (p, c) => corners.push([p[0], p[1], c[0], c[1], c[2]]);
+            for (let k = 0; k + 1 < edge.length; k++) {
+                put(root, bands[0]); put(ringPt(k, 0), ringCol(k, 0)); put(ringPt(k + 1, 0), ringCol(k + 1, 0));
+                for (let j = 0; j + 1 < RINGS.length; j++) {
+                    const a = ringPt(k, j), b = ringPt(k + 1, j), c = ringPt(k + 1, j + 1), d = ringPt(k, j + 1);
+                    const ca = ringCol(k, j), cb = ringCol(k + 1, j), cc = ringCol(k + 1, j + 1), cd = ringCol(k, j + 1);
+                    put(a, ca); put(b, cb); put(c, cc);
+                    put(a, ca); put(c, cc); put(d, cd);
+                }
+            }
+            return corners;
+        }
+
+        const FORE_WING = makeWing([0, 0.08],
+            [[0.2, 0.05], [0.9, 0.6], [1.1, 1.3], [0.8, 1.75], [0.2, 1.65], [-0.15, 0.9], [-0.1, 0.2]],
+            [[0.04, 0.1, 0.35], [0.12, 0.5, 1.0], [0.35, 0.85, 1.0], BF_DARK, BF_DARK, BF_DARK]);
+        const HIND_WING = makeWing([-0.05, 0.06],
+            [[0.05, 0.3], [-0.1, 0.9], [-0.45, 1.3], [-0.95, 1.25], [-1.2, 0.8], [-1.0, 0.35], [-0.5, 0.1]],
+            [[0.08, 0.06, 0.3], [0.3, 0.35, 1.0], [0.55, 0.75, 1.0], BF_DARK, BF_DARK, BF_DARK]);
+
+        function butterflyBody() {
+            const parts = [];
+            const add = (c, R, r, col, mesh = SPHERE_LO) => parts.push({ c, R, r, col, mesh });
+            add([0.1, 0, 0], I3, [0.34, 0.14, 0.14], BF_DARK);
+            add([-0.55, 0, -0.03], I3, [0.55, 0.1, 0.1], [0.16, 0.13, 0.2]);
+            add([0.5, 0, 0.03], I3, [0.14, 0.13, 0.13], BF_DARK);
+            for (const s of [1, -1]) {
+                const R = mul(rotZ(s * 0.35), rotY(-0.6));
+                const d = apply(R, 1, 0, 0);
+                add([0.55 + d[0] * 0.45, s * 0.05 + d[1] * 0.45, 0.06 + d[2] * 0.45], R, [0.45, 0.018, 0.018], BF_DARK);
+                add([0.55 + d[0] * 0.92, s * 0.05 + d[1] * 0.92, 0.06 + d[2] * 0.92], I3, [0.05, 0.05, 0.05], BF_DARK);
+            }
+            return parts;
+        }
+        const BF_BODY = butterflyBody();
+        const BUTTERFLY_CORNERS = BF_BODY.reduce((n, p) => n + p.mesh.idx.length, 0) + 2 * (FORE_WING.length + HIND_WING.length);
+
+        const rnd = Math.random;
+        const BF = {
+            x: space.X0 + 6, y: space.Y0 - 5, alt: 4, z: 0,
+            heading: rnd() * Math.PI * 2, turn: 0, speed: 5,
+            yaw: 0, pitch: 0, roll: 0,
+            phase: 0, glide: 0,
+            seed: [rnd() * 10, rnd() * 10, rnd() * 10, rnd() * 10],
+        };
+
+        function updateButterfly(dt, time) {
+            const [s0, s1, s2, s3] = BF.seed;
+            let turn = 1.3 * (Math.sin(time * 0.7 + s0) * 0.9 + Math.sin(time * 1.9 + s1) * 0.5 + Math.sin(time * 0.23 + s2) * 0.8);
+
+            const ox = BF.x - space.X0, oy = BF.y - space.Y0, r = Math.hypot(ox, oy), edge = WANDER;
+            if (r > edge) turn += wrapAngle(Math.atan2(-oy, -ox) - BF.heading) * 2.5 * Math.min(1.5, (r - edge) / 4);
+
+            const bx = C.x - BF.x, by = C.y - BF.y, bd = Math.hypot(bx, by);
+            if (bd > 16) turn += wrapAngle(Math.atan2(by, bx) - BF.heading) * 0.9 * Math.min(1, (bd - 16) / 10);
+
+            BF.turn += (turn - BF.turn) * Math.min(1, dt * 3);
+            BF.heading += BF.turn * dt;
+            BF.speed = 4.2 + 1.6 * Math.sin(time * 0.5 + s3);
+            // strong wind carries the butterfly along a little
+            const carry = Math.max(0, wind.strength - 0.5) * 1.5;
+            BF.x += (Math.cos(BF.heading) * BF.speed + wind.dx * carry) * dt;
+            BF.y += (Math.sin(BF.heading) * BF.speed + wind.dy * carry) * dt;
+
+            const glideTarget = Math.sin(time * 0.37 + s1) > 0.75 ? 1 : 0;
+            BF.glide += (glideTarget - BF.glide) * Math.min(1, dt * 4);
+            BF.phase += dt * Math.PI * 2 * 7 * (1 - 0.9 * BF.glide);
+
+            const targetAlt = 4.3 + 2.0 * Math.sin(time * 0.31 + s2) + 0.8 * Math.sin(time * 0.83 + s0) - 1.2 * BF.glide;
+            const prevZ = BF.z;
+            BF.alt += (targetAlt - BF.alt) * Math.min(1, dt * 1.5);
+            BF.z = Math.max(height(BF.x, BF.y), WATER_LEVEL) + BF.alt + 0.16 * Math.sin(BF.phase) * (1 - BF.glide);
+            const climb = (BF.z - prevZ) / Math.max(dt, 1e-3);
+
+            BF.yaw = BF.heading;
+            BF.pitch = Math.max(-0.5, Math.min(0.5, -0.12 - climb * 0.04));
+            BF.roll = Math.max(-0.6, Math.min(0.6, -BF.turn * 0.3));
+        }
+
+        function writeButterfly(o, time) {
+            const G = mul(rotZ(BF.yaw), mul(rotY(BF.pitch), rotX(BF.roll)));
+            const base = [BF.x, BF.y, BF.z];
+            const S = [BF_SCALE, BF_SCALE, BF_SCALE];
+            o = writeEllipsoids(o, BF_BODY, G, S, base);
+
+            const flap = (ph) => 0.1 + 1.05 * (0.5 + 0.5 * Math.sin(ph));
+            const foreAng = flap(BF.phase) * (1 - BF.glide) + 0.3 * BF.glide;
+            const hindAng = flap(BF.phase - 0.35) * (1 - BF.glide) + 0.25 * BF.glide;
+
+            const wing = (corners, ang, s) => {
+                const ca = Math.cos(ang), sa = Math.sin(ang);
+                const n = normalize(apply(G, 0, -s * sa, ca));
+                const lit = 0.5 + 0.55 * Math.abs(n[0] * LIGHT[0] + n[1] * LIGHT[1] + n[2] * LIGHT[2]);
+                for (const [wx, wy, r, g, b] of corners) {
+                    const lx = wx * BF_SCALE, ly = s * (0.08 + wy * ca) * BF_SCALE, lz = (0.04 + wy * sa) * BF_SCALE;
+                    const p = apply(G, lx, ly, lz);
+                    pos[o] = base[0] + p[0]; pos[o + 1] = base[1] + p[1]; pos[o + 2] = base[2] + p[2]; pos[o + 3] = 1;
+                    col[o] = Math.min(1, r * lit); col[o + 1] = Math.min(1, g * lit); col[o + 2] = Math.min(1, b * lit); col[o + 3] = 1;
+                    o += 4;
+                }
+            };
+            for (const s of [1, -1]) {
+                wing(FORE_WING, foreAng, s);
+                wing(HIND_WING, hindAng, s);
+            }
+            return o;
+        }
+
+        // ------------------------------------------------------------------ pond water + lily pads
+
+        const WATER_RES = 46;
+        const WATER_XY = (() => {
+            const E = POND.r * 1.35, step = (2 * E) / WATER_RES, pts = [];
+            const wet = (x, y) => height(x, y) < WATER_LEVEL;
+            for (let i = 0; i < WATER_RES; i++) {
+                for (let j = 0; j < WATER_RES; j++) {
+                    const x0 = POND.x - E + i * step, y0 = POND.y - E + j * step, x1 = x0 + step, y1 = y0 + step;
+                    if (!(wet(x0, y0) || wet(x1, y0) || wet(x1, y1) || wet(x0, y1))) continue;
+                    pts.push(x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1);
+                }
+            }
+            return Float32Array.from(pts);
+        })();
+        const WATER_DEPTH = WATER_XY.map((_, i, a) => (i % 2 ? 0 : Math.max(0, WATER_LEVEL - height(a[i], a[i + 1]))));
+
+        const LILIES = [[-2.2, 1.6, 0.95], [1.9, -2.4, 0.8], [3.0, 1.5, 0.7], [-0.8, -3.3, 0.85], [-3.6, -1.2, 0.6]]
+            .map(([dx, dy, r], k) => ({ x: POND.x + dx, y: POND.y + dy, r, flower: k % 2 === 0, turn: k * 1.3 }));
+        const LILY_GREEN = [0.24, 0.55, 0.2], LILY_PINK = [1.0, 0.62, 0.78], LILY_CORE = [1.0, 0.9, 0.35];
+
+        function lilyParts(time) {
+            const parts = [];
+            for (const L of LILIES) {
+                const z = WATER_LEVEL + ripple(L.x, L.y, time)[0] + 0.03;
+                const R = rotZ(L.turn + 0.1 * Math.sin(time * 0.4 + L.turn));
+                parts.push({ c: [L.x, L.y, z], R, r: [L.r, L.r * 0.92, 0.04], col: LILY_GREEN, mesh: SPHERE_LO });
+                const fr = L.flower ? 1 : 0.0001;
+                parts.push({ c: [L.x, L.y, z + 0.12 * fr], R, r: [0.28 * fr, 0.28 * fr, 0.16 * fr], col: LILY_PINK, mesh: SPHERE_LO });
+                parts.push({ c: [L.x, L.y, z + 0.24 * fr], R, r: [0.1 * fr, 0.1 * fr, 0.07 * fr], col: LILY_CORE, mesh: SPHERE_LO });
+            }
+            return parts;
+        }
+
+        // three small crossing wave trains → [height, d/dx, d/dy]; wind makes them choppier
+        function ripple(x, y, t) {
+            const w = 0.7 + 0.5 * wind.strength;
+            const a1 = x * 1.3 + t * 1.7, a2 = y * 1.7 - t * 1.3 + x * 0.4, a3 = (x - y) * 2.3 + t * 2.4;
+            const h = (0.035 * Math.sin(a1) + 0.03 * Math.sin(a2) + 0.018 * Math.sin(a3)) * w;
+            const dx = (0.035 * 1.3 * Math.cos(a1) + 0.03 * 0.4 * Math.cos(a2) + 0.018 * 2.3 * Math.cos(a3)) * w;
+            const dy = (0.03 * 1.7 * Math.cos(a2) - 0.018 * 2.3 * Math.cos(a3)) * w;
+            return [h, dx * 3, dy * 3];
+        }
+
+        const POND_CORNERS = WATER_XY.length / 2 + lilyParts(0).reduce((n, p) => n + p.mesh.idx.length, 0);
+
+        function writePond(o, time) {
+            const SHALLOW = [0.22, 0.5, 0.48], DEEP = [0.04, 0.17, 0.26], REFLECT = [0.72, 0.86, 0.97];
+            const cx = space.Xc, cy = space.Yc, cz = space.Zc;
+            for (let i = 0; i < WATER_XY.length; i += 2, o += 4) {
+                const x = WATER_XY[i], y = WATER_XY[i + 1];
+                const [h, dx, dy] = ripple(x, y, time);
+                const z = WATER_LEVEL + h;
+                pos[o] = x; pos[o + 1] = y; pos[o + 2] = z; pos[o + 3] = 1;
+
+                const n = normalize([-dx, -dy, 1]);
+                const v = normalize([cx - x, cy - y, cz - z]);
+                const nv = Math.max(0, n[0] * v[0] + n[1] * v[1] + n[2] * v[2]);
+                const fresnel = 0.18 + 0.72 * Math.pow(1 - nv, 3);
+
+                const ln = LIGHT[0] * n[0] + LIGHT[1] * n[1] + LIGHT[2] * n[2];
+                const rx = 2 * ln * n[0] - LIGHT[0], ry = 2 * ln * n[1] - LIGHT[1], rz = 2 * ln * n[2] - LIGHT[2];
+                const spec = 0.9 * Math.pow(Math.max(0, rx * v[0] + ry * v[1] + rz * v[2]), 60);
+
+                const deep = Math.min(1, WATER_DEPTH[i] / 1.8);
+                for (let k = 0; k < 3; k++) {
+                    const base = SHALLOW[k] + (DEEP[k] - SHALLOW[k]) * deep;
+                    col[o + k] = Math.min(1, base + (REFLECT[k] - base) * fresnel + spec);
+                }
+                col[o + 3] = 1;
+            }
+            return writeEllipsoids(o, lilyParts(time), I3, [1, 1, 1], [0, 0, 0]);
+        }
+
+        // ------------------------------------------------------------------ renderer
+        //
+        // Perspective projection that fills the whole screen (square pixels at any aspect ratio), plus per-pixel
+        // distance fog that dissolves the far meadow into the sky, and drifting cloud shadows.
+
+        const VERT = `
+        attribute vec4 pos;
+        attribute vec4 col;
+        uniform vec3 cPoint;
+        uniform vec3 xAxis;
+        uniform vec3 yAxis;
+        uniform vec3 zAxis;
+        uniform vec2 proj;            // (magnifier, aspect)
+
+        varying vec4 vcol;
+        varying float vDepth;
+        varying vec2 vGround;
+
+        void main() {
+            vcol = col;
+            vec3 d = pos.xyz - cPoint;
+            float xProj = dot(d, xAxis);
+            float yProj = dot(d, yAxis);
+            float zProj = dot(d, zAxis);
+            vDepth = zProj;
+            vGround = pos.xy;
+            float k = proj.x / (1.6 * max(zProj, 0.01));
+            gl_Position = vec4(xProj * k, yProj * k * proj.y, zProj / 400.0 - 1.0, 1.0);
+        }`;
+
+        const FRAG = `
+        precision mediump float;
+        varying vec4 vcol;
+        varying float vDepth;
+        varying vec2 vGround;
+
+        uniform vec3 fogColor;
+        uniform vec2 fogRange;
+        uniform float time;
+
+        void main() {
+            vec3 c = vcol.rgb;
+            float cloud = sin(vGround.x * 0.07 + time * 0.35) * sin(vGround.y * 0.06 - time * 0.22)
+                        + 0.5 * sin((vGround.x + vGround.y) * 0.11 + time * 0.5);
+            c *= mix(0.72, 1.06, smoothstep(-0.6, 0.6, cloud));
+            float f = smoothstep(fogRange.x, fogRange.y, vDepth);
+            gl_FragColor = vec4(mix(c, fogColor, f), 1.0);
+        }`;
+
+        function compileProgram(vsSrc, fsSrc) {
+            const make = (type, src) => {
+                const s = gl.createShader(type);
+                gl.shaderSource(s, src);
+                gl.compileShader(s);
+                if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+                return s;
+            };
+            const p = gl.createProgram();
+            gl.attachShader(p, make(gl.VERTEX_SHADER, vsSrc));
+            gl.attachShader(p, make(gl.FRAGMENT_SHADER, fsSrc));
+            gl.bindAttribLocation(p, 0, "pos");
+            gl.bindAttribLocation(p, 1, "col");
+            gl.linkProgram(p);
+            if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+            return p;
+        }
+
+        const program = compileProgram(VERT, FRAG);
+        gl.useProgram(program);
+        const U = {};
+        for (const name of ["cPoint", "xAxis", "yAxis", "zAxis", "proj", "fogColor", "fogRange", "time"])
+            U[name] = gl.getUniformLocation(program, name);
+
+        const posBuffer = gl.createBuffer(), colBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 0, 0);
+
+        const bindAttribs = (pb, cb) => {
+            gl.bindBuffer(gl.ARRAY_BUFFER, pb);
+            gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, cb);
+            gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 0, 0);
+        };
+
+        function draw(time) {
+
+            gl.uniform3f(U.cPoint, space.Xc, space.Yc, space.Zc);
+            gl.uniform3fv(U.xAxis, space.xUnitVec);
+            gl.uniform3fv(U.yAxis, space.yUnitVec);
+            gl.uniform3fv(U.zAxis, space.zUnitVec);
+            gl.uniform2f(U.proj, space.magnifier, canvas.width / canvas.height);
+            gl.uniform3fv(U.fogColor, SKY);
+            gl.uniform2f(U.fogRange, FOG_START, FOG_END);
+            gl.uniform1f(U.time, time);
+
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            bindAttribs(groundPosBuffer, groundColBuffer);
+            gl.drawArrays(gl.TRIANGLES, 0, groundVert);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
+            gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, col, gl.DYNAMIC_DRAW);
+            bindAttribs(posBuffer, colBuffer);
+            gl.drawArrays(gl.TRIANGLES, 0, totalVert);
+        }
+
+        // ------------------------------------------------------------------ loop
+
+        let time = 0, last = performance.now();
+
+        function frame(now) {
+            const dt = Math.min(0.1, (now - last) / 1000);
+            last = now;
+            time += dt;
+
+            updateWind(dt, time);
+            updateBunny(dt, time);
+            updateButterfly(dt, time);
+            writePond(writeButterfly(writeBunny(writeBlades(wind.clock, time), time), time), time);
+            draw(time);
+            requestAnimationFrame(frame);
+        }
+
+        buildScene(BLADE_COUNT);
+        requestAnimationFrame(frame);
+    </script>
+</body>
+
+</html>
