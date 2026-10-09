@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Umbra</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,700;1,500&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; }
+        html, body { margin: 0; height: 100%; overflow: hidden; background: #070608; color: #f3e6d2; font-family: Inter, "Segoe UI", system-ui, sans-serif; user-select: none; -webkit-user-select: none; touch-action: none; }
+        #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+        #view:active { cursor: grabbing; }
+        .hidden { display: none !important; }
+        .serif { font-family: "Cormorant Garamond", Georgia, serif; }
+
+        #title { position: fixed; inset: 0; display: grid; align-items: end; justify-items: start; padding: 0 0 10vh 7vw; cursor: pointer; background: linear-gradient(90deg, rgba(7, 6, 8, 0.85) 0%, rgba(7, 6, 8, 0.45) 40%, transparent 70%); }
+        .logo { margin: 0; font-family: "Cormorant Garamond", serif; font-weight: 700; font-size: clamp(72px, 14vw, 170px); line-height: 0.85; letter-spacing: 0.04em; color: #f6ead6; text-shadow: 14px 14px 0 rgba(0, 0, 0, 0.55); }
+        .tag { font-family: "Cormorant Garamond", serif; font-style: italic; font-size: clamp(20px, 2.4vw, 28px); color: #d8c4a6; margin: 10px 0 26px; }
+        .begin { display: inline-block; padding: 12px 30px; border: 1px solid rgba(243, 230, 210, 0.5); border-radius: 2px; letter-spacing: 0.35em; font-size: 13px; font-weight: 600; background: rgba(243, 230, 210, 0.06); animation: breathe 2.6s ease-in-out infinite; }
+        @keyframes breathe { 50% { background: rgba(243, 230, 210, 0.16); } }
+        .tmeta { margin-top: 18px; font-size: 14px; color: #b8a58b; }
+        .tmeta button { margin-left: 10px; background: none; border: 0; color: #f3e6d2; text-decoration: underline; font: inherit; cursor: pointer; }
+
+        #hud { position: fixed; inset: 0; pointer-events: none; }
+        #lvbox { position: absolute; top: 22px; left: 26px; }
+        #lvbox .serif { font-size: 40px; line-height: 1; }
+        #lvbox small { display: block; letter-spacing: 0.3em; font-size: 11px; color: #a8957c; }
+        #axes { font-size: 13px; color: #b8a58b; margin-top: 6px; }
+        #meterbox { position: absolute; top: 18px; right: 26px; text-align: center; }
+        #meterbox svg { display: block; }
+        #pct { position: absolute; top: 34px; left: 0; right: 0; font-family: "Cormorant Garamond", serif; font-size: 26px; }
+        #meterbox small { letter-spacing: 0.25em; font-size: 10px; color: #a8957c; }
+        #timer { font-size: 13px; color: #b8a58b; margin-top: 2px; }
+        #hintbtn { position: absolute; bottom: 24px; right: 26px; pointer-events: auto; background: rgba(243, 230, 210, 0.08); color: #f3e6d2; border: 1px solid rgba(243, 230, 210, 0.35); padding: 9px 18px; font: 600 12px Inter, sans-serif; letter-spacing: 0.2em; cursor: pointer; }
+        #hintbtn:disabled { opacity: 0.4; cursor: default; }
+        #helper { position: absolute; bottom: 26px; left: 26px; font-size: 13px; color: #a8957c; font-style: italic; font-family: "Cormorant Garamond", serif; font-size: 18px; }
+
+        #toast { position: fixed; top: 16%; left: 50%; transform: translateX(-50%); font-family: "Cormorant Garamond", serif; font-size: 26px; font-style: italic; opacity: 0; transition: opacity 0.3s; pointer-events: none; text-shadow: 0 2px 10px #000; }
+        #toast.show { opacity: 1; }
+
+        #result, #album { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(5, 4, 6, 0.55); }
+        .card { text-align: center; padding: 30px 44px; background: rgba(18, 14, 16, 0.86); border: 1px solid rgba(243, 230, 210, 0.18); box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6); }
+        #r-shape svg { filter: drop-shadow(0 0 18px rgba(255, 200, 120, 0.55)); }
+        #r-name { font-family: "Cormorant Garamond", serif; font-size: 44px; margin: 10px 0 0; }
+        #r-stars { font-size: 42px; letter-spacing: 8px; margin: 4px 0; }
+        #r-stars i, .cell small { font-style: normal; }
+        #r-stars i { color: rgba(243, 230, 210, 0.15); display: inline-block; animation: pop 0.5s cubic-bezier(.2, 1.7, .5, 1) both; }
+        #r-stars i.on { color: #ffd27a; text-shadow: 0 0 16px rgba(255, 190, 90, 0.8); }
+        @keyframes pop { 0% { transform: scale(0); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+        #r-info { color: #b8a58b; font-size: 14px; }
+        .btns { display: flex; gap: 10px; justify-content: center; margin-top: 22px; }
+        .btn { padding: 11px 24px; background: rgba(243, 230, 210, 0.08); color: #f3e6d2; border: 1px solid rgba(243, 230, 210, 0.35); font: 600 12px Inter, sans-serif; letter-spacing: 0.22em; cursor: pointer; }
+        .btn.main { background: #f3e6d2; color: #151012; }
+
+        #album .card { max-width: min(760px, 94vw); }
+        #album h2 { margin: 0 0 14px; font-family: "Cormorant Garamond", serif; font-size: 38px; font-weight: 500; }
+        #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 10px; max-height: 58vh; overflow-y: auto; }
+        .cell { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 4px; background: rgba(243, 230, 210, 0.05); border: 1px solid rgba(243, 230, 210, 0.1); }
+        .cell b { font-family: "Cormorant Garamond", serif; font-size: 40px; color: rgba(243, 230, 210, 0.2); height: 56px; line-height: 56px; }
+        .cell span { font-size: 12px; color: #d8c4a6; }
+        .cell small { color: #ffd27a; font-size: 12px; min-height: 14px; }
+        .cell.unknown span { color: #6f6255; }
+    </style>
+</head>
+
+<body>
+    <canvas id="view"></canvas>
+    <div id="toast"></div>
+
+    <div id="title">
+        <div>
+            <h1 class="logo">Umbra</h1>
+            <div class="tag">every sculpture hides a shape in its shadow</div>
+            <div class="begin">CLICK TO BEGIN</div>
+            <div class="tmeta">Shapes discovered: <span id="t-found">0</span><button id="t-album">View album</button></div>
+        </div>
+    </div>
+
+    <div id="hud" class="hidden">
+        <div id="lvbox"><small>SCULPTURE</small><div class="serif" id="lv">1</div><div id="axes"></div></div>
+        <div id="meterbox">
+            <svg width="96" height="96" viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="none" stroke="rgba(243,230,210,0.12)" stroke-width="4" /><circle id="ring" cx="50" cy="50" r="45" fill="none" stroke="#9c8f86" stroke-width="4" stroke-linecap="round" stroke-dasharray="283" stroke-dashoffset="283" transform="rotate(-90 50 50)" style="transition: stroke 0.3s" /></svg>
+            <div id="pct">0%</div>
+            <small>RESEMBLANCE</small>
+            <div id="timer">0s</div>
+        </div>
+        <div id="helper">Turn the sculpture until its shadow becomes a picture</div>
+        <button id="hintbtn">Hint (H)</button>
+    </div>
+
+    <div id="result" class="hidden">
+        <div class="card">
+            <div id="r-shape"></div>
+            <div id="r-name"></div>
+            <div id="r-stars"></div>
+            <div id="r-info"></div>
+            <div class="btns"><button class="btn" id="r-album">ALBUM</button><button class="btn main" id="r-next">NEXT SCULPTURE</button></div>
+        </div>
+    </div>
+
+    <div id="album" class="hidden">
+        <div class="card">
+            <h2>Shadow album</h2>
+            <div id="grid"></div>
+            <div class="btns"><button class="btn main" id="a-back">CONTINUE</button></div>
+        </div>
+    </div>
+
+    <script type="module" src="main.js"></script>
+</body>
+
+</html>

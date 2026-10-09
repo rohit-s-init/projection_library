@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Skyputt</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; }
+        html, body { margin: 0; height: 100%; overflow: hidden; background: #a9cdf2; color: #fff; font-family: Fredoka, "Segoe UI", system-ui, sans-serif; user-select: none; -webkit-user-select: none; touch-action: none; }
+        #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
+        .hidden { display: none !important; }
+        .sh { text-shadow: 0 2px 0 rgba(30, 70, 40, 0.35), 0 4px 18px rgba(20, 50, 90, 0.35); }
+
+        #title { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; cursor: pointer; background: radial-gradient(ellipse at 50% 45%, rgba(255, 255, 255, 0) 35%, rgba(30, 70, 120, 0.3) 100%); }
+        .logo { margin: 0; font-weight: 700; font-size: clamp(64px, 12vw, 150px); line-height: 1; letter-spacing: 0.02em; color: #fff; text-shadow: 0 6px 0 #3f8f3a, 0 10px 0 #2c6b2a, 0 18px 30px rgba(20, 50, 90, 0.4); }
+        .logo span { color: #ffe066; }
+        .tag { font-size: clamp(16px, 2vw, 22px); margin: 22px 0 28px; font-weight: 600; }
+        .begin { display: inline-block; padding: 14px 40px; border-radius: 40px; font-size: 18px; font-weight: 700; letter-spacing: 0.08em; color: #2c6b2a; background: #fff; box-shadow: 0 6px 0 #cfe3cf, 0 12px 30px rgba(20, 50, 90, 0.3); animation: bob 2s ease-in-out infinite; }
+        @keyframes bob { 50% { transform: translateY(-5px); } }
+        .tmeta { margin-top: 22px; font-size: 15px; font-weight: 600; }
+        .how { margin-top: 8px; font-size: 14px; font-weight: 400; opacity: 0.95; }
+
+        #hud { position: fixed; inset: 0; pointer-events: none; }
+        #holebox { position: absolute; top: 16px; left: 16px; padding: 10px 18px 12px; border-radius: 18px; background: rgba(255, 255, 255, 0.88); color: #2c4a2c; box-shadow: 0 8px 24px rgba(20, 50, 90, 0.25); }
+        #holebox small, #totbox small { display: block; font-size: 11px; font-weight: 600; letter-spacing: 0.15em; opacity: 0.7; }
+        .big { font-size: 34px; font-weight: 700; line-height: 1; }
+        .row { display: flex; gap: 18px; align-items: flex-end; }
+        .row .mid { font-size: 22px; font-weight: 700; }
+        #pips { display: flex; gap: 4px; margin-top: 8px; }
+        #pips i { width: 20px; height: 20px; border-radius: 6px; background: #e6eee6; font-style: normal; font-size: 12px; font-weight: 700; display: grid; place-items: center; color: #fff; }
+        #pips i.cur { background: #ffe066; box-shadow: 0 0 0 2px #2c4a2c inset; }
+        #pips i.under { background: #e2455c; }
+        #pips i.par { background: #4caf50; }
+        #pips i.over { background: #5a7ea8; }
+        #totbox { position: absolute; top: 16px; right: 16px; padding: 10px 18px 12px; border-radius: 18px; background: rgba(255, 255, 255, 0.88); color: #2c4a2c; text-align: right; box-shadow: 0 8px 24px rgba(20, 50, 90, 0.25); }
+        #hint { position: absolute; bottom: 18px; left: 0; right: 0; text-align: center; font-size: 15px; font-weight: 600; opacity: 0.95; }
+
+        #banner { position: fixed; top: 30%; left: 0; right: 0; text-align: center; pointer-events: none; opacity: 0; }
+        #banner.show { animation: pop 2.4s ease-out forwards; }
+        @keyframes pop { 0% { opacity: 0; transform: scale(0.3) rotate(-6deg); } 12% { opacity: 1; transform: scale(1.12) rotate(2deg); } 22% { transform: scale(1) rotate(0); } 80% { opacity: 1; } 100% { opacity: 0; transform: translateY(-20px); } }
+        #b-title { font-size: clamp(44px, 8vw, 96px); font-weight: 700; color: #fff; text-shadow: 0 5px 0 #3f8f3a, 0 12px 30px rgba(20, 50, 90, 0.45); }
+        #banner.k1 #b-title { color: #ffe066; text-shadow: 0 5px 0 #c0392b, 0 12px 30px rgba(20, 50, 90, 0.45); }
+        #banner.k2 #b-title { color: #ffe066; text-shadow: 0 5px 0 #8e44ad, 0 0 40px rgba(255, 220, 90, 0.9), 0 12px 30px rgba(20, 50, 90, 0.45); }
+        #b-sub { font-size: 20px; font-weight: 600; text-shadow: 0 2px 10px rgba(20, 50, 90, 0.5); }
+
+        #toast { position: fixed; top: 22%; left: 50%; transform: translateX(-50%); font-size: 20px; font-weight: 600; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+        #toast.show { opacity: 1; }
+
+        #card { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(30, 70, 120, 0.3); cursor: pointer; }
+        .panel { text-align: center; padding: 26px 30px; border-radius: 26px; background: #fff; color: #2c4a2c; box-shadow: 0 10px 0 #cfe3cf, 0 30px 80px rgba(20, 50, 90, 0.4); animation: rise 0.6s cubic-bezier(.2, 1.4, .4, 1) both; max-width: 94vw; }
+        @keyframes rise { from { transform: translateY(40px) scale(0.9); opacity: 0; } }
+        .panel h2 { margin: 0 0 12px; font-size: 32px; }
+        table { border-collapse: collapse; margin: 0 auto; font-size: 15px; }
+        th { text-align: left; padding: 4px 10px 4px 0; font-size: 12px; letter-spacing: 0.12em; opacity: 0.6; }
+        td { width: 30px; padding: 5px 0; text-align: center; font-weight: 600; border-bottom: 1px solid #eef3ee; }
+        td.under { color: #e2455c; } td.over { color: #5a7ea8; } td.t { padding-left: 10px; font-weight: 700; }
+        #c-rel { font-size: 64px; font-weight: 700; margin-top: 10px; line-height: 1; }
+        #c-best { margin-top: 6px; font-size: 14px; letter-spacing: 0.1em; opacity: 0.8; }
+        #c-best.new { color: #e2455c; opacity: 1; animation: blink 1s ease-in-out infinite; }
+        @keyframes blink { 50% { opacity: 0.5; } }
+        .panel button { margin-top: 18px; padding: 12px 34px; border: 0; border-radius: 30px; font: 700 16px Fredoka, sans-serif; color: #fff; background: #4caf50; box-shadow: 0 5px 0 #2c6b2a; cursor: pointer; }
+        @media (max-width: 640px) { #pips i { width: 16px; height: 16px; font-size: 10px; } .big { font-size: 26px; } td { width: 22px; font-size: 13px; } }
+    </style>
+</head>
+
+<body>
+    <canvas id="view"></canvas>
+    <div id="toast" class="sh"></div>
+    <div id="banner"><div id="b-title"></div><div id="b-sub"></div></div>
+
+    <div id="title" class="sh">
+        <div>
+            <h1 class="logo">Sky<span>putt</span></h1>
+            <div class="tag">mini golf on floating islands</div>
+            <div class="begin">TAP TO TEE OFF</div>
+            <div class="tmeta">Best round: <span id="t-best">—</span></div>
+            <div class="how">drag back &amp; release to putt · or ←/→ aim, ↑/↓ power, Space to putt</div>
+        </div>
+    </div>
+
+    <div id="hud" class="hidden">
+        <div id="holebox">
+            <div class="row"><div><small>HOLE</small><div class="big"><span id="hole">1</span><span style="font-size:16px;opacity:.5">/9</span></div></div><div><small>PAR</small><div class="mid" id="par">3</div></div><div><small>STROKES</small><div class="mid" id="strokes">0</div></div></div>
+            <div id="pips"></div>
+        </div>
+        <div id="totbox"><small>TOTAL</small><div class="big" id="total">E</div></div>
+        <div id="hint" class="sh">drag back from anywhere and let go to putt</div>
+    </div>
+
+    <div id="card" class="hidden">
+        <div class="panel">
+            <h2>Round complete</h2>
+            <table id="c-rows"></table>
+            <div id="c-rel">E</div>
+            <div id="c-best"></div>
+            <button id="c-again">PLAY A NEW COURSE</button>
+        </div>
+    </div>
+
+    <script type="module" src="main.js"></script>
+</body>
+
+</html>

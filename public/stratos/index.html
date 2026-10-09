@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Stratos</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@200;400;700;900&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; }
+        html, body { margin: 0; height: 100%; overflow: hidden; background: #8fb6e6; color: #fff; font-family: Outfit, "Segoe UI", system-ui, sans-serif; user-select: none; -webkit-user-select: none; touch-action: none; }
+        #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: pointer; }
+        .hidden { display: none !important; }
+        .shadow { text-shadow: 0 2px 18px rgba(10, 20, 50, 0.45); }
+
+        #title { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; cursor: pointer; background: radial-gradient(ellipse at 50% 40%, rgba(255, 255, 255, 0) 30%, rgba(10, 25, 60, 0.35) 100%); }
+        .logo { margin: 0; font-weight: 900; font-size: clamp(64px, 13vw, 170px); letter-spacing: 0.18em; padding-left: 0.18em; line-height: 0.95; background: linear-gradient(180deg, #ffffff 30%, #cfe3ff 70%, #9cc0ff); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 8px 30px rgba(20, 40, 90, 0.35)); }
+        .tag { font-weight: 200; font-size: clamp(16px, 2vw, 22px); letter-spacing: 0.35em; margin: 6px 0 34px; }
+        .begin { display: inline-block; padding: 13px 36px; border-radius: 40px; font-size: 13px; font-weight: 700; letter-spacing: 0.3em; color: #1d3c74; background: rgba(255, 255, 255, 0.9); box-shadow: 0 10px 30px rgba(20, 40, 90, 0.3); animation: float 2.6s ease-in-out infinite; }
+        @keyframes float { 50% { transform: translateY(-5px); box-shadow: 0 16px 36px rgba(20, 40, 90, 0.35); } }
+        .tmeta { margin-top: 24px; font-size: 14px; font-weight: 400; letter-spacing: 0.15em; opacity: 0.9; }
+        .how { margin-top: 10px; font-size: 13px; font-weight: 200; letter-spacing: 0.08em; opacity: 0.85; }
+
+        #hud { position: fixed; inset: 0; pointer-events: none; }
+        #score { position: absolute; top: 7vh; left: 0; right: 0; text-align: center; font-weight: 900; font-size: clamp(64px, 11vw, 120px); line-height: 1; }
+        #score.bump { animation: bump 0.25s ease-out; }
+        @keyframes bump { 0% { transform: scale(1.18); } 100% { transform: scale(1); } }
+        #bestbox { position: absolute; top: 18px; right: 22px; font-size: 13px; letter-spacing: 0.2em; font-weight: 400; opacity: 0.9; }
+        #bestbox b { font-weight: 700; font-size: 18px; margin-left: 6px; }
+        #combo { position: absolute; top: calc(7vh + clamp(70px, 12vw, 130px)); left: 0; right: 0; text-align: center; font-weight: 700; font-size: 22px; letter-spacing: 0.3em; opacity: 0; }
+        #combo.show { animation: pop 0.9s ease-out forwards; }
+        #combo.hot { color: #fff3b0; text-shadow: 0 0 18px rgba(255, 220, 120, 0.9), 0 2px 10px rgba(10, 20, 50, 0.4); font-size: 28px; }
+        @keyframes pop { 0% { opacity: 0; transform: scale(0.6); } 15% { opacity: 1; transform: scale(1.1); } 30% { transform: scale(1); } 75% { opacity: 1; } 100% { opacity: 0; transform: translateY(-14px); } }
+        #banner { position: absolute; top: 40%; left: 0; right: 0; text-align: center; font-weight: 200; font-size: clamp(22px, 3.4vw, 40px); letter-spacing: 0.6em; padding-left: 0.6em; opacity: 0; }
+        #banner.show { animation: band 3.2s ease-in-out forwards; }
+        @keyframes band { 0% { opacity: 0; letter-spacing: 1.2em; } 20% { opacity: 1; letter-spacing: 0.6em; } 75% { opacity: 1; } 100% { opacity: 0; } }
+        #hint { position: absolute; bottom: 22px; left: 0; right: 0; text-align: center; font-size: 13px; font-weight: 200; letter-spacing: 0.25em; opacity: 0.8; }
+
+        #toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); font-size: 15px; letter-spacing: 0.2em; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+        #toast.show { opacity: 1; }
+
+        #over { position: fixed; inset: 0; display: grid; place-items: center; cursor: pointer; background: radial-gradient(ellipse at 50% 50%, rgba(10, 20, 50, 0.1), rgba(10, 20, 50, 0.45)); }
+        .card { text-align: center; padding: 30px 52px 28px; border-radius: 26px; background: rgba(255, 255, 255, 0.14); border: 1px solid rgba(255, 255, 255, 0.35); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: 0 30px 80px rgba(10, 20, 50, 0.35); animation: rise 0.6s cubic-bezier(.2, 1.4, .4, 1) both; }
+        @keyframes rise { from { transform: translateY(30px) scale(0.95); opacity: 0; } }
+        .card small { display: block; font-size: 12px; letter-spacing: 0.4em; opacity: 0.85; }
+        #o-floors { font-weight: 900; font-size: 96px; line-height: 1; margin: 4px 0; }
+        #o-zone { font-weight: 400; font-size: 17px; letter-spacing: 0.1em; }
+        #o-info { margin-top: 6px; font-size: 13px; font-weight: 200; letter-spacing: 0.1em; }
+        #o-best { margin-top: 14px; font-size: 12px; letter-spacing: 0.3em; font-weight: 400; }
+        #o-best.new { color: #fff3b0; text-shadow: 0 0 14px rgba(255, 220, 120, 0.9); animation: blink 1s ease-in-out infinite; }
+        @keyframes blink { 50% { opacity: 0.5; } }
+        .again { margin-top: 22px; display: inline-block; padding: 11px 30px; border-radius: 30px; font-size: 12px; font-weight: 700; letter-spacing: 0.3em; color: #1d3c74; background: rgba(255, 255, 255, 0.92); }
+    </style>
+</head>
+
+<body>
+    <canvas id="view"></canvas>
+    <div id="toast" class="shadow"></div>
+
+    <div id="title" class="shadow">
+        <div>
+            <h1 class="logo">STRATOS</h1>
+            <div class="tag">BUILD TO THE STARS</div>
+            <div class="begin">TAP TO BUILD</div>
+            <div class="tmeta">HIGHEST TOWER &nbsp;<b id="t-best">0</b></div>
+            <div class="how">tap or press space to drop each slab · overhangs are sliced away · perfect streaks grow it back</div>
+        </div>
+    </div>
+
+    <div id="hud" class="hidden shadow">
+        <div id="score">0</div>
+        <div id="combo"></div>
+        <div id="banner"></div>
+        <div id="bestbox">BEST<b id="best">0</b></div>
+        <div id="hint">TAP · SPACE</div>
+    </div>
+
+    <div id="over" class="hidden shadow">
+        <div class="card">
+            <small>FLOORS</small>
+            <div id="o-floors">0</div>
+            <div id="o-zone"></div>
+            <div id="o-info"></div>
+            <div id="o-best"></div>
+            <div class="again">BUILD AGAIN</div>
+        </div>
+    </div>
+
+    <script type="module" src="main.js"></script>
+</body>
+
+</html>

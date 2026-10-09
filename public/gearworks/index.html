@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Gearworks</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Rye&family=Share+Tech+Mono&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; }
+        html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0705; color: #f4dfb8; font-family: Inter, "Segoe UI", system-ui, sans-serif; user-select: none; -webkit-user-select: none; touch-action: none; }
+        #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+        .hidden { display: none !important; }
+        .brass { background: linear-gradient(180deg, #fff1c4 0%, #f2c46b 35%, #a86d24 60%, #f7d68b 80%, #8a5a1c 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+        #title { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; cursor: pointer; background: radial-gradient(ellipse at 50% 50%, rgba(11, 7, 5, 0.25) 0%, rgba(11, 7, 5, 0.85) 70%); }
+        .logo { margin: 0; font-family: Rye, Georgia, serif; font-weight: 400; font-size: clamp(54px, 10vw, 130px); line-height: 1; letter-spacing: 0.02em; filter: drop-shadow(0 6px 0 #3a210c) drop-shadow(0 0 30px rgba(255, 170, 70, 0.35)); }
+        .tag { font-family: Rye, serif; font-size: clamp(15px, 1.8vw, 20px); color: #d9b27a; margin: 10px 0 26px; letter-spacing: 0.08em; }
+        .begin { display: inline-block; padding: 12px 34px; border: 2px solid #c99a4c; border-radius: 4px; letter-spacing: 0.3em; font-size: 12px; font-weight: 600; color: #ffe2a8; background: linear-gradient(#3a2412, #24160b); box-shadow: inset 0 1px 0 rgba(255, 220, 160, 0.3), 0 0 24px rgba(255, 160, 60, 0.25); animation: breathe 2.2s ease-in-out infinite; }
+        @keyframes breathe { 50% { box-shadow: inset 0 1px 0 rgba(255, 220, 160, 0.3), 0 0 40px rgba(255, 160, 60, 0.55); } }
+        .controls { margin-top: 26px; display: grid; grid-template-columns: auto auto; gap: 6px 18px; justify-content: center; font-size: 13px; color: #c7a780; text-align: left; }
+        .controls b { color: #ffe2a8; font-family: "Share Tech Mono", monospace; font-weight: 400; }
+        .tbest { margin-top: 20px; font-size: 13px; color: #a88a66; letter-spacing: 0.1em; }
+        .tbest span { font-family: "Share Tech Mono", monospace; color: #ffcf7a; font-size: 16px; }
+
+        #hud { position: fixed; inset: 0; pointer-events: none; }
+        .panel { position: absolute; padding: 12px 16px; background: linear-gradient(#2a190c, #160d06); border: 2px solid #9a6b2c; border-radius: 6px; box-shadow: inset 0 1px 0 rgba(255, 220, 160, 0.25), 0 10px 30px rgba(0, 0, 0, 0.5); }
+        .panel small { display: block; font-size: 10px; letter-spacing: 0.3em; color: #b48d5c; }
+        #scorebox { top: 16px; left: 16px; min-width: 210px; }
+        #score { font-family: "Share Tech Mono", monospace; font-size: 34px; color: #ffb347; text-shadow: 0 0 10px rgba(255, 150, 40, 0.8), 0 0 24px rgba(255, 110, 20, 0.5); letter-spacing: 0.04em; }
+        .row { display: flex; gap: 18px; margin-top: 6px; }
+        .row div { font-family: "Share Tech Mono", monospace; font-size: 18px; color: #ffd594; }
+        #locks i { display: inline-block; width: 12px; height: 12px; margin-right: 4px; border-radius: 50%; border: 1px solid #9a6b2c; background: #2a1a0c; vertical-align: -1px; }
+        #locks i.on { background: #ff7a2a; box-shadow: 0 0 8px #ff7a2a; }
+        #locks i.lit { animation: blink 0.5s steps(2) infinite; }
+        @keyframes blink { 50% { background: #ff7a2a; } }
+        #bestbox { top: 16px; right: 16px; text-align: right; }
+        #best { font-family: "Share Tech Mono", monospace; font-size: 18px; color: #ffd594; }
+        #gaugebox { right: 16px; top: 86px; text-align: center; padding: 10px 12px 8px; }
+        #gauge { position: relative; width: 110px; height: 110px; border-radius: 50%; background: radial-gradient(circle at 50% 40%, #f6e7c6, #cdb38a 70%, #8a6a3e 72%, #4a3218 76%, #b48a48 80%, #3a2410 100%); box-shadow: inset 0 0 12px rgba(0, 0, 0, 0.6); }
+        #gauge::before { content: ""; position: absolute; inset: 14px; border-radius: 50%; background: conic-gradient(from 225deg, #2f9e58 0deg 160deg, #e0b02a 160deg 230deg, #d3361e 230deg 270deg, transparent 270deg); -webkit-mask: radial-gradient(circle, transparent 60%, #000 61%); mask: radial-gradient(circle, transparent 60%, #000 61%); opacity: 0.85; }
+        #needle { position: absolute; left: 53px; top: 16px; width: 4px; height: 40px; background: linear-gradient(#c3200c, #6a1006); border-radius: 2px; transform-origin: 2px 39px; transition: transform 0.25s cubic-bezier(.3, 1.6, .5, 1); }
+        #gauge::after { content: ""; position: absolute; left: 47px; top: 47px; width: 16px; height: 16px; border-radius: 50%; background: radial-gradient(#ffe6a8, #8a5a1c); }
+        #gauge.blast { animation: shake 0.12s infinite; }
+        @keyframes shake { 25% { transform: translate(1px, -1px); } 75% { transform: translate(-1px, 1px); } }
+        #gaugebox small { margin-top: 6px; }
+        #help { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); font-size: 12px; color: #9c7f5c; white-space: nowrap; text-shadow: 0 1px 4px #000; }
+        #help b { color: #ffd594; font-family: "Share Tech Mono", monospace; font-weight: 400; }
+
+        #banner { position: fixed; top: 34%; left: 50%; transform: translate(-50%, -50%); text-align: center; pointer-events: none; opacity: 0; }
+        #banner.show { opacity: 1; }
+        #banner.anim { animation: bannerIn 2s ease-out forwards; }
+        @keyframes bannerIn { 0% { transform: translate(-50%, -50%) scale(0.4); opacity: 0; } 10% { transform: translate(-50%, -50%) scale(1.12); opacity: 1; } 18% { transform: translate(-50%, -50%) scale(1); } 80% { opacity: 1; } 100% { transform: translate(-50%, -60%) scale(1); opacity: 0; } }
+        #b-title { font-family: Rye, serif; font-size: clamp(38px, 6vw, 72px); white-space: nowrap; background: linear-gradient(180deg, #fff1c4 0%, #f2c46b 35%, #a86d24 60%, #f7d68b 80%, #8a5a1c 100%); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 4px 0 #2a1608) drop-shadow(0 0 20px rgba(255, 150, 50, 0.6)); }
+        #b-sub { font-family: "Share Tech Mono", monospace; font-size: 18px; color: #ffd594; letter-spacing: 0.15em; text-shadow: 0 2px 6px #000; }
+        #banner.blast #b-title { filter: drop-shadow(0 4px 0 #2a1608) drop-shadow(0 0 30px rgba(255, 90, 30, 0.9)); }
+        #banner.jackpot #b-title { background: linear-gradient(180deg, #ffe0ff, #ff7ad9 45%, #a3237a 65%, #ffc0f0); -webkit-background-clip: text; background-clip: text; }
+        #banner.save #b-title { background: linear-gradient(180deg, #e0f4ff, #7ac8ff 45%, #2366a3 65%, #c0e6ff); -webkit-background-clip: text; background-clip: text; }
+
+        #popups { position: fixed; inset: 0; pointer-events: none; }
+        .pop { position: absolute; transform: translate(-50%, -50%); font-family: "Share Tech Mono", monospace; font-size: 15px; color: #ffd594; text-shadow: 0 0 8px rgba(255, 150, 40, 0.9), 0 1px 2px #000; animation: rise 0.9s ease-out forwards; }
+        @keyframes rise { to { transform: translate(-50%, -180%); opacity: 0; } }
+
+        #toast { position: fixed; top: 22%; left: 50%; transform: translateX(-50%); font-family: Rye, serif; font-size: 24px; color: #ffd594; opacity: 0; transition: opacity 0.25s; pointer-events: none; text-shadow: 0 2px 10px #000; }
+        #toast.show { opacity: 1; }
+
+        #over { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(8, 5, 3, 0.6); cursor: pointer; }
+        .card { text-align: center; padding: 30px 48px; background: linear-gradient(#2a190c, #140b05); border: 3px solid #b0803a; border-radius: 10px; box-shadow: inset 0 1px 0 rgba(255, 220, 160, 0.3), 0 30px 80px rgba(0, 0, 0, 0.7); }
+        .card h2 { margin: 0; font-family: Rye, serif; font-weight: 400; font-size: 40px; }
+        #o-score { font-family: "Share Tech Mono", monospace; font-size: 52px; color: #ffb347; text-shadow: 0 0 14px rgba(255, 150, 40, 0.8); margin: 6px 0; }
+        #o-info { color: #c7a780; font-size: 14px; }
+        #o-best { margin-top: 10px; font-size: 13px; letter-spacing: 0.2em; color: #a88a66; }
+        #o-best.new { color: #ffcf7a; animation: blink2 0.8s ease-in-out infinite; }
+        @keyframes blink2 { 50% { opacity: 0.4; } }
+        .again { margin-top: 20px; font-size: 12px; letter-spacing: 0.3em; color: #ffe2a8; }
+
+        @media (max-width: 760px) {
+            #scorebox { min-width: 0; padding: 8px 10px; } #score { font-size: 24px; }
+            #gaugebox { top: 70px; transform: scale(0.75); transform-origin: top right; }
+            #bestbox { padding: 8px 10px; } #help { display: none; }
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="view"></canvas>
+    <div id="popups"></div>
+    <div id="toast"></div>
+    <div id="banner"><div id="b-title"></div><div id="b-sub"></div></div>
+
+    <div id="title">
+        <div>
+            <h1 class="logo brass">GEARWORKS</h1>
+            <div class="tag">~ a steam-powered pinball machine ~</div>
+            <div class="begin">PRESS SPACE OR TAP</div>
+            <div class="controls">
+                <b>Z / ←</b><span>left flipper</span>
+                <b>/ / →</b><span>right flipper</span>
+                <b>SPACE</b><span>hold &amp; release the plunger</span>
+                <b>TOUCH</b><span>left / right half of the screen</span>
+            </div>
+            <div class="tbest">HIGH SCORE &nbsp;<span id="t-best">0</span></div>
+        </div>
+    </div>
+
+    <div id="hud" class="hidden">
+        <div class="panel" id="scorebox">
+            <small>SCORE</small>
+            <div id="score">0</div>
+            <div class="row"><div><small>BALL</small><span id="ballno">1</span>/3</div><div><small>BONUS</small><span id="mult">×1</span></div><div><small>LOCKS</small><span id="locks"></span></div></div>
+        </div>
+        <div class="panel" id="bestbox"><small>HIGH SCORE</small><div id="best">0</div></div>
+        <div class="panel" id="gaugebox"><div id="gauge"><div id="needle"></div></div><small>BOILER</small></div>
+        <div id="help">bumpers build <b>pressure</b> · top lanes raise <b>bonus</b> · valves light the <b>furnace lock</b> · 2 locks = <b>multiball</b></div>
+    </div>
+
+    <div id="over" class="hidden">
+        <div class="card">
+            <h2 class="brass">GAME OVER</h2>
+            <div id="o-score">0</div>
+            <div id="o-info"></div>
+            <div id="o-best"></div>
+            <div class="again">PRESS SPACE OR TAP TO PLAY AGAIN</div>
+        </div>
+    </div>
+
+    <script type="module" src="main.js"></script>
+</body>
+
+</html>
